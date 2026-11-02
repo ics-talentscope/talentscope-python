@@ -111,6 +111,8 @@ class InterceptHandler(logging.Handler):
 def _patch_record(record: dict) -> None:
     from core import request_context
 
+    for field in ("module", "action", "status"):
+        record["extra"].setdefault(field, "-")
     for key, value in request_context.log_context().items():
         record["extra"].setdefault(key, value)
     record["message"] = _SECRET_ASSIGNMENT_RE.sub(r"\1\2[REDACTED]", record["message"])
@@ -162,7 +164,11 @@ def configure_logging(directory: Path, level: str = "INFO", environment: str | N
         rotation="00:00",
         retention="365 days",
         encoding="utf-8",
-        format="{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | {message} | {extra}{exception}\n",
+        format=(
+            "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | "
+            "{extra[module]: <18} | {extra[action]: <28} | "
+            "{extra[status]: <8} | {message} | {extra}{exception}\n"
+        ),
         backtrace=False,
         diagnose=False,
         enqueue=True,
