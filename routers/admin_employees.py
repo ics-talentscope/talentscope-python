@@ -2,11 +2,14 @@ import csv
 import io
 import logging
 from typing import Optional
+from urllib.parse import urlsplit
 
+import httpx
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import Response
 
 from core.auth import acting_admin_email, require_any_permission, require_permission
+from core.config import env
 from core.db import get_store
 from core.errors import json_error, public_error
 from services import admin_accounts, corp_pool, docs_storage, portal_roster as pr, test_video
@@ -492,6 +495,43 @@ def _xlsx(data: bytes, name: str) -> Response:
     return Response(data, media_type=XLSX_MIME, headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
+def _production_portal_export(request: Request, export_name: str) -> Optional[Response]:
+    base_url = env("PORTAL_EXPORT_API_URL").rstrip("/")
+    if not base_url:
+        return None
+    parsed = urlsplit(base_url)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        log.error("PORTAL_EXPORT_API_URL must be an HTTPS URL without credentials, query, or fragment")
+        return json_error(503, "Production portal exports are not configured correctly.")
+    if parsed.hostname and parsed.hostname.casefold() == (request.url.hostname or "").casefold():
+        log.error("PORTAL_EXPORT_API_URL points back to the current API host")
+        return json_error(503, "Production portal exports are not configured correctly.")
+
+    authorization = request.headers.get("authorization")
+    if not authorization:
+        return json_error(401, "Unauthorized")
+
+    try:
+        with httpx.Client(timeout=60, follow_redirects=False) as client:
+            upstream = client.get(
+                f"{base_url}/api/admin/employees/{export_name}",
+                headers={"Authorization": authorization},
+            )
+    except httpx.HTTPError as err:
+        log.error("Production portal export request failed for %s: %s", export_name, err)
+        return json_error(502, "Production portal export is unavailable.")
+
+    if 300 <= upstream.status_code < 400:
+        log.error("Production portal export unexpectedly redirected for %s", export_name)
+        return json_error(502, "Production portal export is unavailable.")
+    headers = {
+        name: upstream.headers[name]
+        for name in ("content-type", "content-disposition")
+        if name in upstream.headers
+    }
+    return Response(content=upstream.content, status_code=upstream.status_code, headers=headers)
+
+
 @router.post("/export-shortlisted")
 def export_shortlisted(body: dict = Body(default_factory=dict)):
     import re
@@ -520,6 +560,9 @@ def export_portal(request: Request):
     if email and not admin_accounts.get_access(email)["canViewEmployeePortal"]:
         return json_error(403, "Employee Portal is not available for this login.")
     try:
+        production_export = _production_portal_export(request, "export-portal")
+        if production_export is not None:
+            return production_export
         results = _test_results(get_store())
         employees = pr.build_portal_employees(results)
         done = [a["test_id"] for a in employees if a.get("test_id") and a.get("test_status") == "completed"]
@@ -538,6 +581,9 @@ def export_portal_summary(request: Request):
     if email and not admin_accounts.get_access(email)["canViewEmployeePortal"]:
         return json_error(403, "Employee Portal is not available for this login.")
     try:
+        production_export = _production_portal_export(request, "export-portal-summary")
+        if production_export is not None:
+            return production_export
         results = _test_results(get_store())
         employees = pr.build_portal_employees(results)
         done = [a["test_id"] for a in employees if a.get("test_id") and a.get("test_status") == "completed"]

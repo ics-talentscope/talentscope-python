@@ -300,3 +300,54 @@ def test_exports(client, store, admin):
     assert [c.value for c in ws[2]][2:] == [1, 1, 1, 2] and [c.value for c in ws[3]][2:] == [1, 0, 0, 1]
     assert client.post("/api/admin/employees/percentage-matching", headers=admin, files=[("files", ("c.csv", b"name\nA\n"))]).status_code == 400
     assert client.post("/api/admin/employees/percentage-matching", headers=admin).status_code == 400
+
+
+@pytest.mark.parametrize(
+    "path,export_name",
+    [
+        ("/api/admin/employees/export-portal", "export-portal"),
+        ("/api/admin/employees/export-portal-summary", "export-portal-summary"),
+    ],
+)
+def test_portal_exports_use_configured_production_api(client, admin, monkeypatch, path, export_name):
+    import httpx
+
+    calls = []
+
+    class UpstreamClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def get(self, url, headers):
+            calls.append((url, headers))
+            return httpx.Response(
+                200,
+                headers={
+                    "content-type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    "content-disposition": 'attachment; filename="production.xlsx"',
+                },
+                content=b"production workbook",
+                request=httpx.Request("GET", url),
+            )
+
+    monkeypatch.setenv("PORTAL_EXPORT_API_URL", "https://production.example")
+    monkeypatch.setattr("routers.admin_employees.httpx.Client", lambda **_kwargs: UpstreamClient())
+    monkeypatch.setattr(
+        "routers.admin_employees._test_results",
+        lambda _store: pytest.fail("development data must not be used for configured production exports"),
+    )
+
+    response = client.get(path, headers=admin)
+
+    assert response.status_code == 200
+    assert response.content == b"production workbook"
+    assert response.headers["content-disposition"] == 'attachment; filename="production.xlsx"'
+    assert calls == [
+        (
+            f"https://production.example/api/admin/employees/{export_name}",
+            {"Authorization": admin["Authorization"]},
+        )
+    ]

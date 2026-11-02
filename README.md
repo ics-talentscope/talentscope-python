@@ -33,6 +33,8 @@ The VM deployment workflows mount `/opt/recordings/prod` or `/opt/recordings/dev
 
 Before recreating the API container, deployment copies the existing `/app/uploads` contents from its current Docker volume into the matching `/opt/recordings/<environment>` directory. This is a copy, not a destructive move: the old volume is retained as a recovery copy, and subsequent builds/redeployments do not sync or delete files from `/opt/recordings`. Verify the recordings in the application before manually removing any old Docker volume.
 
+Development Employee Portal exports use the production API as their source so the detailed Excel export and summary use the same employee data and mapping as production. Set `PORTAL_EXPORT_API_URL` in the development environment file to the production API base URL (HTTPS, without a trailing path to the export endpoint). The development deployment requires this setting. The dev API forwards the signed-in admin's bearer token, and production performs its normal authentication and permission checks; the admin token signing secret and account permissions must therefore be valid in both environments. If the production API rejects the token or is unavailable, the export fails instead of falling back to development data. Production exports continue to use their local production data.
+
 ## Database migrations and seeds
 
 The `db/` directory contains SQL migrations, seed data, and the Node-based database CLI. Run migrations deliberately from an administrator/developer machine that can reach the target database; deployment does not automatically seed production data.
