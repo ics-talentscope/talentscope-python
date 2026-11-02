@@ -498,6 +498,9 @@ def _xlsx(data: bytes, name: str) -> Response:
 def _production_portal_export(request: Request, export_name: str) -> Optional[Response]:
     base_url = env("PORTAL_EXPORT_API_URL").rstrip("/")
     if not base_url:
+        if env("PORTAL_EXPORT_REQUIRE_PRODUCTION").lower() in {"1", "true", "yes", "on"}:
+            log.error("PORTAL_EXPORT_API_URL is required for development portal exports")
+            return json_error(503, "Production portal exports are not configured.")
         return None
     parsed = urlsplit(base_url)
     if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:

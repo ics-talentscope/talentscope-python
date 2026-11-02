@@ -351,3 +351,17 @@ def test_portal_exports_use_configured_production_api(client, admin, monkeypatch
             {"Authorization": admin["Authorization"]},
         )
     ]
+
+
+def test_portal_export_without_production_url_does_not_fall_back_to_dev(client, admin, monkeypatch):
+    monkeypatch.delenv("PORTAL_EXPORT_API_URL", raising=False)
+    monkeypatch.setenv("PORTAL_EXPORT_REQUIRE_PRODUCTION", "1")
+    monkeypatch.setattr(
+        "routers.admin_employees._test_results",
+        lambda _store: pytest.fail("development data must not be used for portal exports"),
+    )
+
+    response = client.get("/api/admin/employees/export-portal-summary", headers=admin)
+
+    assert response.status_code == 503
+    assert response.json()["error"] == "Production portal exports are not configured."

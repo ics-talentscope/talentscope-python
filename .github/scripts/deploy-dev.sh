@@ -51,7 +51,8 @@ services:
     environment:
       NODE_ENV: development
       LOG_DIR: /opt/logs
-      PORTAL_EXPORT_API_URL: \${PORTAL_EXPORT_API_URL:?Set the production API base URL in the development environment file}
+      PORTAL_EXPORT_API_URL: \${PORTAL_EXPORT_API_URL:-}
+      PORTAL_EXPORT_REQUIRE_PRODUCTION: "1"
     volumes:
       - /opt/logs:/opt/logs
 EOF
