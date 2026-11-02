@@ -15,9 +15,7 @@ MODULE_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 
 
 def _dir():
-    path = UPLOAD_DIR / "logs"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return UPLOAD_DIR / "logs"
 
 
 def write_log(module: str, action: str, status: str, details: str, actor: Optional[str] = None) -> None:
@@ -61,7 +59,8 @@ def read_logs(module: str = "all") -> list[dict]:
         if MODULE_RE.match(module):
             files = [_dir() / f"{module}.log"]
     else:
-        files = [f for f in _dir().glob("*.log") if f.name != "error.log"]
+        directory = _dir()
+        files = [f for f in directory.glob("*.log") if f.name != "error.log"] if directory.is_dir() else []
     logs = []
     for path in files:
         try:

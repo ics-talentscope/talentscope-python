@@ -119,7 +119,10 @@ def _sql_list_ids() -> set[str]:
 def _disk_list_ids() -> set[str]:
     try:
         ids: set[str] = set()
-        for path in storage.bucket_dir(BUCKET).iterdir():
+        folder = storage.UPLOAD_DIR / BUCKET
+        if not folder.is_dir():
+            return ids
+        for path in folder.iterdir():
             if path.is_file() and path.name.endswith(".webm") and path.stat().st_size > 0:
                 ids.add(path.name[:-5])
         return ids
