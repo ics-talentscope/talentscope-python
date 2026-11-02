@@ -60,7 +60,7 @@ sudo mkdir -p "$APP_DIR"
 sudo chown -R "$(id -un):$(id -gn)" "$APP_DIR"
 rsync -a --delete --checksum \
   --exclude='/.env*' --exclude='/.git/' --exclude='/.github/' \
-  --exclude='/uploads/' --exclude='/logs/' --exclude='/venv/' --exclude='/.venv/' \
+  --exclude='/uploads/' --exclude='/recordings/' --exclude='/logs/' --exclude='/venv/' --exclude='/.venv/' \
   --exclude='/.pytest_cache/' --exclude='/**/__pycache__/' --exclude='*.pyc' \
   "$SRC/" "$APP_DIR/"
 [[ -f "$COMPOSE_OVERRIDE" ]] || { echo "Missing recordings Compose override: $COMPOSE_OVERRIDE" >&2; exit 1; }

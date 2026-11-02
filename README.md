@@ -75,6 +75,9 @@ Apply the PostgreSQL migration in `db/supabase/migrations/` through the Supabase
 
 ## Local development
 
+Local uploads and recordings are stored under `recordings/` by default. The folder
+is present in the repository, but its runtime contents are ignored by Git.
+
 Install `requirements.txt`, install Microsoft's ODBC Driver 18 for SQL Server, and run:
 
 ```powershell
