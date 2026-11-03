@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -32,6 +33,9 @@ def test_list_and_get(client, world):
     assert len(listed) == 1 and listed[0]["topic_title"] == "ONE SDL Basics"
     got = client.get(f"/api/employee/tests/{TEST_ID}", headers=world).json()
     assert len(got["questions"]) == 3 and got["has_recording"] is False and got["attempts"] == []
+    assert all("correct_option_index" not in question and "explanation" not in question for question in got["questions"])
+    started = client.post(f"/api/employee/tests/{TEST_ID}/start", headers=world).json()
+    assert all("correct_option_index" not in question for question in started["questions"])
 
 
 def test_other_employees_test_is_hidden(client, world, store):
@@ -42,8 +46,9 @@ def test_other_employees_test_is_hidden(client, world, store):
 
 
 def test_patch_start_then_submit_scores(client, world, store):
+    started_at = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     started = client.patch(f"/api/employee/tests/{TEST_ID}", headers=world,
-                           json={"status": "in_progress", "started_at": "2026-10-01T10:00:00.000Z"})
+                           json={"status": "in_progress", "started_at": started_at, "camera_granted": True})
     assert started.status_code == 200
     assert store.first("tests", {"id": TEST_ID})["proctoring"]["sessionStartedAt"]
     assert client.patch(f"/api/employee/tests/{TEST_ID}", headers=world, json={"status": "pending"}).status_code == 409
@@ -51,11 +56,18 @@ def test_patch_start_then_submit_scores(client, world, store):
                {"question_id": "ffffffff-ffff-4fff-8fff-ffffffffffff", "selected_index": 1}]
     res = client.post(f"/api/employee/tests/{TEST_ID}/submit", headers=world, json={"answers": answers}).json()
     assert res["correct"] == 1 and res["total"] == 3 and res["accuracy"] == 33
+    assert {question["id"] for question in res["questions"]} == {Q[0], Q[1]}
+    assert Q[2] not in {question["id"] for question in res["questions"]}
+    assert all("correct_option_index" in question for question in res["questions"])
     row = store.first("tests", {"id": TEST_ID})
     assert row["status"] == "completed" and row["score_percent"] == 33
     assert store.count("test_attempts", {"test_id": TEST_ID}) == 2
+    review = client.get(f"/api/employee/tests/{TEST_ID}", headers=world).json()
+    assert {question["id"] for question in review["questions"]} == {Q[0], Q[1]}
+    assert Q[2] not in {question["id"] for question in review["questions"]}
     again = client.post(f"/api/employee/tests/{TEST_ID}/submit", headers=world, json={"answers": answers}).json()
     assert again["alreadyCompleted"] is True
+    assert {question["id"] for question in again["questions"]} == {Q[0], Q[1]}
     assert client.patch(f"/api/employee/tests/{TEST_ID}", headers=world, json={"current_question_index": 1}).status_code == 409
 
 
@@ -66,13 +78,14 @@ def test_submit_before_start_rejected(client, world):
 
 
 def test_proctoring_cooldown_and_auto_submit(client, world, store, monkeypatch):
-    store.update("tests", {"status": "in_progress", "started_at": "2026-10-02T00:00:00Z"}, {"id": TEST_ID})
+    started_at = datetime.now(timezone.utc).isoformat()
+    store.update("tests", {"status": "in_progress", "started_at": started_at}, {"id": TEST_ID})
     first = client.post(f"/api/employee/tests/{TEST_ID}/proctor_violation", headers=world, json={"violationType": "Tab Switch"}).json()
     assert first["proctoring"]["warningCount"] == 1 and first["proctoring"]["violations"][0]["category"] == "browser"
     burst = client.post(f"/api/employee/tests/{TEST_ID}/proctor_violation", headers=world, json={"violationType": "Tab Switch"}).json()
     assert burst["proctoring"]["warningCount"] == 1
     monkeypatch.setattr(et, "VIOLATION_COOLDOWN_MS", 0)
-    client.post(f"/api/employee/tests/{TEST_ID}/proctor_violation", headers=world, json={"violationType": "Face missing"})
+    client.post(f"/api/employee/tests/{TEST_ID}/proctor_violation", headers=world, json={"violationType": "Tab Switch"})
     third = client.post(f"/api/employee/tests/{TEST_ID}/proctor_violation", headers=world, json={"violationType": "Phone detected"}).json()
     assert third["autoSubmit"] is True and third["proctoring"]["warningCount"] == 3
 
@@ -84,7 +97,12 @@ def test_reset_regenerates_questions(client, world, store):
     assert len(qs) == 10 and store.first("tests", {"id": TEST_ID})["status"] == "pending"
 
 
-def test_product_assessment_reset_archives_history(client, world, store):
+def test_product_assessment_reset_archives_history(client, world, store, monkeypatch):
+    class ReverseRandom:
+        def shuffle(self, values):
+            values.reverse()
+
+    monkeypatch.setattr(et.random, "SystemRandom", ReverseRandom)
     store.update("tests", {"topic_id": "resource-product-assessment", "status": "completed", "score_percent": 80}, {"id": TEST_ID})
     store.update("employees", {"product_qb_eligible": True}, {"employee_id": "EMP1"})
     res = client.delete(f"/api/employee/tests/{TEST_ID}", headers=world).json()
@@ -92,6 +110,10 @@ def test_product_assessment_reset_archives_history(client, world, store):
     topics = [t["topic_id"] for t in store.select("tests")]
     assert any(t.startswith("resource-product-assessment-history:") for t in topics)
     assert store.first("tests", {"id": TEST_ID})["status"] == "pending"
+    shuffled = et.questions_for(TEST_ID)
+    assert [question["id"] for question in shuffled] == [Q[2], Q[1], Q[0]]
+    assert shuffled[0]["options"] == ["d", "c", "b", "a"]
+    assert shuffled[0]["correct_option_index"] == 2
     history = [t for t in store.select("tests") if t["topic_id"].startswith("resource-product-assessment-history")][0]
     assert len(store.select("test_questions", {"test_id": history["id"]})) == 3
     assert client.delete(f"/api/employee/tests/{history['id']}", headers=world).status_code == 403

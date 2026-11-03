@@ -77,6 +77,8 @@ def store(monkeypatch):
     resumes._cache.clear()
     for name in ("ADMIN_PASSWORD", "SCREENING_ADMIN_PASSWORD"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SAML_ENABLED", "0")
+    monkeypatch.setenv("SAML_ADMIN_SSO", "0")
     yield memory
     set_store(None)
 

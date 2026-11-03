@@ -54,9 +54,9 @@ def login(request: Request, body: dict = Body(default_factory=dict)):
         raw_password = body.get("password")
         password = as_password(raw_password.strip() if isinstance(raw_password, str) else raw_password, allow_empty=True)
         if not employee_id and not login_email:
-            return json_error(400, "Employee ID is required")
+            return json_error(400, "Enter a valid Employee ID or registered email address.")
         if password is None:
-            return json_error(400, "Invalid request")
+            return json_error(400, "Password must be provided as text and cannot exceed 256 characters.")
         rate_key = (employee_id or login_email or "").upper()
         account_limit = is_rate_limited_any([f"auth:acct:{rate_key}"], 8, 60_000)
         if account_limit.limited:
@@ -68,7 +68,7 @@ def login(request: Request, body: dict = Body(default_factory=dict)):
                 employee_id = employee["employee_id"]
         if not employee:
             # Same message as bad password to avoid account enumeration.
-            return json_error(401, "Invalid credentials")
+            return json_error(401, "Employee ID or password is incorrect. Check both fields and try again.")
         has_pw = accounts.has_password(employee)
         hash_valid = has_pw and accounts.verify_password(password, employee.get("password_salt") or "", employee.get("password_hash") or "")
         first_login = employee["is_first_login"] if employee.get("is_first_login") is not None else not has_pw
@@ -78,14 +78,14 @@ def login(request: Request, body: dict = Body(default_factory=dict)):
         is_emp_id_pw = bool(password) and password.upper() == employee["employee_id"].strip().upper()
         if not password:
             audit.add_log(actor, "EMPLOYEE_LOGIN_FAILURE", "Employee Portal", "Blank password rejected", ip)
-            return json_error(401, "Invalid credentials")
+            return json_error(401, "Enter your employee ID and password.")
         allowed_initial = first_login and is_emp_id_pw
         if not hash_valid and not allowed_initial:
             if first_login and not has_pw:
-                audit.add_log(actor, "EMPLOYEE_LOGIN_FAILURE", "Employee Portal", "First login requires SSO or a set password", ip)
-                return json_error(401, "Sign in with Microsoft, or ask HR to set your initial password.")
+                audit.add_log(actor, "EMPLOYEE_LOGIN_FAILURE", "Employee Portal", "No initial employee password is configured", ip)
+                return json_error(401, "No password is configured for this account yet. Sign in with Microsoft or ask HR to set your initial password.")
             audit.add_log(actor, "EMPLOYEE_LOGIN_FAILURE", "Employee Portal", "Invalid password provided", ip)
-            return json_error(401, "Invalid credentials")
+            return json_error(401, "Employee ID or password is incorrect. Check both fields and try again.")
         # Emp-ID temporary password always forces the keep/change modal.
         force_password_prompt = first_login or (is_emp_id_pw and hash_valid)
         token = sign_token(employee["employee_id"])
@@ -97,7 +97,7 @@ def login(request: Request, body: dict = Body(default_factory=dict)):
         audit.add_log(actor, "EMPLOYEE_LOGIN_SUCCESS", "Employee Portal", "Employee logged in and synced successfully", ip)
         return {"status": "ok", "token": token, "employee": _employee_payload(employee)}
     except Exception as err:
-        return public_error(err, "Unable to verify credentials")
+        return public_error(err, "Employee sign-in could not be completed. Retry; contact support if it continues.")
 
 
 @router.get("/validate")

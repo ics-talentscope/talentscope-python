@@ -1,5 +1,6 @@
 import io
 import json
+import re
 
 import pytest
 from openpyxl import Workbook
@@ -158,15 +159,31 @@ def test_dispatch_mail_corp_pool_and_portal(client, store, admin):
     res = client.post("/api/admin/employees/dispatch_mail", headers=admin, json={"adminEmail": "rm@infinite.com"}).json()
     assert res["count"] == 1 and res["dispatched"][0]["status"] == "simulated"
     mail = store.select("simulated_emails")[0]
-    assert "&lt;b&gt;Eve&lt;/b&gt;" in mail["body"] and "<b>Eve</b>" not in mail["body"] and mail["rm_email"] == "rm@infinite.com"
+    assert "&lt;b&gt;Eve&lt;/b&gt;" in mail["body"] and "<b>Eve</b>" not in mail["body"] and mail["rm_email"] == "boss@infinite.com"
+    assert "Temporary password:" in mail["body"]
     assert store.first("candidate_sessions", {"email": "e1@x.com"}) is not None and store.count("resumes") == 1
     portal = client.post("/api/admin/employees/dispatch_mail", headers=admin,
                          json={"portal": True, "recipients": [{"employee_id": "1001", "email": "p@x.com", "full_name": "Pat"}, {"employee_id": "", "email": "x@x.com"}]}).json()
     assert portal["count"] == 1 and store.count("resumes") == 1
-    assert "/employee?org=BizX" in store.select("simulated_emails")[-1]["body"] and "Employee ID: <strong>1001</strong>" in store.select("simulated_emails")[-1]["body"]
+    portal_mail = store.first("simulated_emails", {"candidate_email": "p@x.com"})
+    assert "https://talentscope.infinite.com/" in portal_mail["body"] and "Employee ID:</strong> 1001" in portal_mail["body"]
     assert client.post("/api/admin/employees/dispatch_mail", headers=admin, json={"employeeIds": ["E2"]}).status_code == 400
     corp_pool.save_roster([])
     assert client.post("/api/admin/employees/dispatch_mail", headers=admin, json={}).status_code == 404
+
+
+def test_dispatch_mail_assigns_candidate_password(client, store, admin):
+    rows = roster("E1")
+    rows[0].update(shortlisted=True, email="e1@x.com")
+    corp_pool.save_roster(rows)
+    response = client.post("/api/admin/employees/dispatch_mail", headers=admin, json={})
+    assert response.status_code == 200 and response.json()["dispatched"][0]["status"] == "simulated"
+    mail = store.select("simulated_emails")[0]
+    password = re.search(r"Temporary password: <strong>([^<]+)</strong>", mail["body"]).group(1)
+    session = store.first("candidate_sessions", {"email": "e1@x.com"})
+    assert session["password_hash"] and session["password_hash"] != password
+    login = client.post("/api/interview/access", json={"email": "e1@x.com", "password": password})
+    assert login.status_code == 200 and login.json()["success"] is True
 
 
 def test_jd_match_via_shared_engine(client, store, admin):

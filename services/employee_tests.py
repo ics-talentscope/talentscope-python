@@ -1,4 +1,5 @@
 import logging
+import random
 import re
 import threading
 import time
@@ -211,6 +212,41 @@ def reset_test(test_id: str) -> None:
         "session_recording_url": None, "proctoring": None, "score_correct": None, "score_total": None,
         "score_percent": None, "ai_analysis": None}, {"id": test_id})
     test_video.delete(test_id)
+    shuffle_questions(test_id)
+
+
+def shuffle_questions(test_id: str) -> None:
+    store = get_store()
+    questions = questions_for(test_id)
+    if not questions:
+        return
+
+    rng = random.SystemRandom()
+    order = list(questions)
+    rng.shuffle(order)
+    offset = max(int(q["question_index"]) for q in questions) + len(questions) + 1
+    for index, question in enumerate(order):
+        store.update("test_questions", {"question_index": offset + index}, {"id": question["id"]})
+
+    for index, question in enumerate(order):
+        choices = list(enumerate(question.get("options") or []))
+        rng.shuffle(choices)
+        correct_index = question.get("correct_option_index")
+        correct_option_index = next(
+            (i for i, (original_index, _) in enumerate(choices) if original_index == correct_index),
+            None,
+        )
+        if correct_option_index is None:
+            raise ValueError(f"Question {question['id']} has an invalid correct option index.")
+        store.update(
+            "test_questions",
+            {
+                "question_index": index,
+                "options": [option for _, option in choices],
+                "correct_option_index": correct_option_index,
+            },
+            {"id": question["id"]},
+        )
 
 
 def regenerate_questions(test: dict) -> None:
@@ -223,6 +259,7 @@ def regenerate_questions(test: dict) -> None:
     store.delete("test_questions", {"test_id": test_id})
     generated = question_bank.fetch_questions(test.get("subject_title") or "", test.get("topic_title") or test["topic_id"], difficulty)
     store.insert("test_questions", question_bank.to_rows(test_id, generated, test["topic_id"], test.get("topic_title") or "", difficulty))
+    shuffle_questions(test_id)
 
 
 def _option_label(index: int) -> str:
@@ -240,6 +277,8 @@ def question_attempts_batch(test_ids: list[str]) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {i: [] for i in ids}
     for q in sorted(questions, key=lambda r: (r["test_id"], r["question_index"])):
         attempt = by_question.get(str(q["id"]))
+        if not attempt:
+            continue
         selected = attempt.get("selected_option_index") if attempt else None
         options = q.get("options") or []
         text = f"{_option_label(selected)}) {options[selected]}" if selected is not None and 0 <= selected < len(options) else None

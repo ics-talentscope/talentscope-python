@@ -11,13 +11,15 @@ def seed_employee(store, **over):
     store.seed("employees", [row])
 
 
-def test_admin_login_requires_configured_password(client):
+def test_admin_login_requires_configured_password(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAIL", "someone@infinite.com")
     res = client.post("/api/admin/auth/login", json={"email": "someone@infinite.com", "password": "x"})
     assert res.status_code == 503
     assert res.json()["error"] == "Admin password not setup"
 
 
 def test_admin_login_success_and_wrong_password(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAIL", "someone@infinite.com")
     monkeypatch.setenv("ADMIN_PASSWORD", "S3cret!pw")
     ok = client.post("/api/admin/auth/login", json={"email": "someone@infinite.com", "password": "S3cret!pw"})
     assert ok.status_code == 200 and ok.json()["token"]
@@ -71,6 +73,15 @@ def test_employee_first_login_flow(client, store, monkeypatch):
     assert wrong.status_code == 401
     me = client.get("/api/employee/auth/validate", headers=headers)
     assert me.status_code == 200 and me.json()["employee"]["employee_id"] == "EMP1"
+
+
+def test_employee_password_login_remains_available_when_sso_is_enabled(client, store, monkeypatch):
+    password_hash, password_salt = accounts.hash_password("Current!Pass1")
+    seed_employee(store, is_first_login=False, password_hash=password_hash, password_salt=password_salt)
+    monkeypatch.setattr("routers.employee_auth.saml.get_config", lambda: {"enabled": True})
+    response = client.post("/api/employee/auth/login", json={"employee_id": "EMP1", "password": "Current!Pass1"})
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
 
 
 def test_employee_unknown_id_and_weak_password(client, store):

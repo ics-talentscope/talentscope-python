@@ -9,7 +9,7 @@ from core.config import app_url
 from core.db import get_store
 from core.errors import json_error, public_error
 from core.security import get_client_ip
-from core.validation import as_uuid
+from core.validation import as_email, as_uuid
 from services import admin_accounts, audit, mailer, question_queue, reset_logs, resumes, sessions, storage
 from services.invite_mail import build_invite_html
 from services.structured_log import write_log
@@ -74,10 +74,9 @@ def batch_delete(request: Request, body: dict = Body(default_factory=dict)):
 
 @router.post("/reset_by_email")
 def reset_by_email(request: Request, body: dict = Body(default_factory=dict)):
-    raw = body.get("email")
-    if not raw or not isinstance(raw, str):
-        return json_error(400, "Email is required")
-    clean = raw.lower().strip()
+    clean = as_email(body.get("email"))
+    if not clean:
+        return json_error(400, "Please enter a valid candidate email address.")
     actor = acting_admin_email(request) or "unknown"
     try:
         match = next((r for r in resumes.list_resumes()
@@ -86,13 +85,13 @@ def reset_by_email(request: Request, body: dict = Body(default_factory=dict)):
         if match:
             _clear_candidate(match["id"])
         if not session and not match:
-            return json_error(404, f"No registered candidate session or CV record found for {clean}.")
+            return json_error(404, "Candidate not found. Check the email address and try again.")
         reset_logs.add_log(clean, actor, "Reset Form")
         write_log("candidate-processing", "RESET_CANDIDATE_BY_EMAIL", "success", f"Successfully reset candidate session and attempts for email {clean}")
         return {"success": True, "message": f"Session for {clean} has been reset successfully."}
     except Exception as err:
         write_log("candidate-processing", "RESET_CANDIDATE_BY_EMAIL_FAILED", "failed", str(err))
-        return public_error(err, "Reset failed")
+        return public_error(err, "Could not reset the candidate session and assessment. Retry; contact support if it continues.")
 
 
 def _clear_candidate(resume_id: str) -> None:
@@ -183,9 +182,9 @@ def reset(resume_id: str, request: Request, body: dict = Body(default_factory=di
     resume = resumes.get_resume(rid) if rid else None
     if not resume:
         return json_error(404, "Resume record not found")
-    email = (resume.get("parsed") or {}).get("personal", {}).get("email")
+    email = as_email((resume.get("parsed") or {}).get("personal", {}).get("email"))
     if not email:
-        return json_error(400, "Candidate email address not found in resume parsed structure")
+        return json_error(400, "Candidate email is missing or invalid. Update the resume contact details before resetting the session.")
     try:
         actor = acting_admin_email(request) or "unknown"
         sessions.reset_session_by_email(email, rid)
@@ -196,7 +195,7 @@ def reset(resume_id: str, request: Request, body: dict = Body(default_factory=di
         return {"success": True}
     except Exception as err:
         write_log("candidate-processing", "RESET_CANDIDATE_FAILED", "failed", str(err))
-        return public_error(err, "Reset failed")
+        return public_error(err, "Could not reset the candidate session and assessment. Retry; contact support if it continues.")
 
 
 @router.post("/{resume_id}/invite")
@@ -205,9 +204,9 @@ def invite(resume_id: str, request: Request, body: dict = Body(default_factory=d
     resume = resumes.get_resume(rid) if rid else None
     if not resume:
         return json_error(404, "Resume record not found")
-    email = (resume.get("parsed") or {}).get("personal", {}).get("email")
+    email = as_email((resume.get("parsed") or {}).get("personal", {}).get("email"))
     if not email:
-        return json_error(400, "Candidate email address not found in resume parsed structure")
+        return json_error(400, "Candidate email is missing or invalid. Update the resume contact details before sending an invitation.")
     try:
         config = body.get("interviewConfig") if isinstance(body.get("interviewConfig"), dict) else None
         if config:
@@ -218,7 +217,7 @@ def invite(resume_id: str, request: Request, body: dict = Body(default_factory=d
                 question_queue.reset(rid)
             except Exception as err:
                 log.error("Failed to delete existing interview questions on config update: %s", err)
-        sessions.create_candidate_session(email, rid)
+        candidate_password = sessions.issue_candidate_password(email, rid)
         if not question_queue.existing_questions(rid):
             question_queue.enqueue(rid)
         kind = (config or {}).get("interviewType") or "technical"
@@ -227,7 +226,10 @@ def invite(resume_id: str, request: Request, body: dict = Body(default_factory=d
         prefix = {"non-technical": "TalentScope — Interview Assessment",
                   "both": "TalentScope — Technical & Behavioral Assessment"}.get(kind, "TalentScope — Technical Interview Assessment")
         subject = f"{prefix} - {full_name.upper()}"
-        html = build_invite_html(full_name, f"Login email address: <strong>{escape(email)}</strong>", app_url(), label)
+        html = build_invite_html(
+            full_name, f"Login email address: <strong>{escape(email)}</strong>",
+            app_url(), label, candidate_password,
+        )
         status, send_error = mailer.dispatch(email, subject, html)
         rm_email = (resume.get("report") or {}).get("rmEmail") or "admin@infinite.com"
         mailer.record(email, full_name, subject, html, status, rm_email)
@@ -237,4 +239,4 @@ def invite(resume_id: str, request: Request, body: dict = Body(default_factory=d
         return {"success": True, "email": email, "fullName": full_name, "status": status, "error": send_error}
     except Exception as err:
         write_log("email", "INVITE_CANDIDATE_FAILED", "failed", f"Failed to send invite email to candidate ID {rid}")
-        return public_error(err, "Invitation failed")
+        return public_error(err, "Could not prepare or send the candidate invitation. Verify the candidate email and mail service.")

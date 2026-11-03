@@ -384,7 +384,7 @@ def dispatch_mail(request: Request, body: dict = Body(default_factory=dict)):
                                  "overallScore": score, "atsScore": score, "technicalScore": score, "jdMatchScore": score},
                     "enhanced": None, "report": {"rmEmail": requester, "verification": None}, "error": None,
                     "fileHash": f"emp_{emp['employee_id']}_hash", "fileBase64": None})
-                sessions.create_candidate_session(emp["email"], resume_id)
+                candidate_password = sessions.issue_candidate_password(emp["email"], resume_id)
             if portal_mode:
                 from services.portal_invite_mail import build_portal_invite_html
 
@@ -400,7 +400,9 @@ def dispatch_mail(request: Request, body: dict = Body(default_factory=dict)):
             else:
                 subject = "Assessment Invitation - TalentScope"
                 hint = f"Login email address: <strong>{escape(emp['email'])}</strong>"
-                html = build_invite_html(emp["full_name"], hint, portal_url, "technical")
+                html = build_invite_html(
+                    emp["full_name"], hint, portal_url, "technical", candidate_password,
+                )
             status, send_error = mailer.dispatch(emp["email"], subject, html)
             mailer.record(emp["email"], emp["full_name"], subject, html, status, requester)
             audit.add_log(requester, "ADMIN_INVITE_PORTAL_EMPLOYEE" if portal_mode else "ADMIN_INVITE_EMPLOYEE", emp["email"],
