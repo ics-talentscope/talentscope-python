@@ -1,0 +1,58 @@
+services:
+  python:
+    build:
+      context: .
+      dockerfile: python/Dockerfile
+    image: ${API_IMAGE:?API_IMAGE must be set}
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    environment:
+      LOCAL_LLM_URL: http://host.docker.internal:8080
+      FACE_MATCH_SERVICE_URL: http://host.docker.internal:10000
+      MONITOR_DIR: /host-monitor
+      MSSQL_POOL_MAX: "10"
+      API_THREADS: "24"
+      MAX_INFLIGHT: "80"
+      RATE_LIMIT_IP_PER_MIN: "600"
+      LLM_CONCURRENCY: "1"
+      LLM_MAX_QUEUE: "12"
+      LLM_LIVE_WAIT_S: "25"
+      UPLOAD_CONCURRENCY: "3"
+      FACE_CONCURRENCY: "2"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports: !override
+      - "127.0.0.1:${API_PORT:?API_PORT must be set}:8000"
+    volumes:
+      - /var/lib/talentscope-monitor:/host-monitor:ro
+      - type: bind
+        source: ${LOG_HOST_DIR:?LOG_HOST_DIR must be set}
+        target: /opt/logs
+        bind:
+          create_host_path: false
+    command:
+      - uvicorn
+      - main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --workers
+      - "1"
+      - --timeout-keep-alive
+      - "15"
+      - --limit-concurrency
+      - "120"
+    mem_limit: 900m
+    memswap_limit: 1100m
+    cpus: 1.5
+    pids_limit: 256
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fs http://localhost:8000/api/health || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s

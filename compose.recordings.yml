@@ -4,7 +4,7 @@ services:
       UPLOAD_DIR: /app/uploads
     volumes:
       - type: bind
-        source: /opt/recordings/${RECORDINGS_ENV:?RECORDINGS_ENV must be set to prod or dev}
+        source: ${RECORDINGS_PATH:?RECORDINGS_PATH must be set}
         target: /app/uploads
         bind:
           create_host_path: false

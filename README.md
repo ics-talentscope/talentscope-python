@@ -6,7 +6,7 @@ FastAPI backend with SQL Server and Supabase PostgreSQL runtime targets, plus sc
 
 The `Python API - Deploy to Azure Production` GitHub Actions workflow deploys pushes to `main` and can also be run manually with production confirmation. The development workflow deploys pushes to `develop`. Validation runs before deployment, which uses the `self-hosted`, `linux`, and `icsbetintapp01` runner labels.
 
-The runner syncs this repository to `/opt/talentscope/talentscope-UI/python` and updates the existing `python` Compose service using `/opt/talentscope/talentscope-UI/docker-compose.azure.yml`. Production settings remain on the VM in `/opt/talentscope/talentscope-UI/.env.azure`; do not add them to GitHub or this repository.
+The development and production runners sync this repository, including `db/` migration files, to `/opt/talentscope-dev/python` and `/opt/talentscope/python`. They verify every synchronized SQL migration before deployment. They combine the VM's shared `docker-compose.azure.yml` with this repository's `compose.api.yml` and `compose.recordings.yml`, so API deployment does not depend on the shared Compose file already defining a `python` service. Runtime environment files remain on the VM at `/opt/talentscope-dev/.env.local` and `/opt/talentscope/.env.local`; do not add them to GitHub or this repository.
 
 The Employee Portal has separate Excel exports for detailed results and a summary workbook. The summary includes overall totals plus domain, product, and domain-by-product breakdowns for all portal records.
 
@@ -22,16 +22,22 @@ The blueprint attaches a persistent disk at `/app/uploads` for uploaded document
 
 Local generated logs under `logs/` are ignored by Git and excluded from Docker builds
 and Azure deployment syncs. They are not committed or copied from a developer machine.
-On the Azure VM, the running API writes its logs to the separately mounted `/opt/logs`
-directory; deployment updates application code without replacing or syncing those VM
-log files. See [`db/README.md`](./db/README.md#application-logs) for the daily files
-and monthly archive layout.
+On the Azure VM, dev logs are written to `/opt/logs/dev` and production logs to
+`/opt/logs/prod`. These host directories are mounted separately; deployment updates
+application code without syncing or replacing VM log files. See
+[`db/README.md`](./db/README.md#application-logs) for the daily files and monthly
+archive layout.
 
 ### Azure VM uploads and recordings
 
-The VM deployment workflows mount `/opt/recordings/prod` or `/opt/recordings/dev` at `/app/uploads`; production and development therefore keep separate persistent data outside the application checkout and Docker image. Employee-test videos remain in the `employee_test_recordings/` subfolder and retain their `<test-id>.webm` names, which the API uses to associate each video with its database test/employee record.
+The VM deployment workflows mount `/opt/recordings/dev` for development and `/opt/recording/prod` for production at `/app/uploads`; production and development therefore keep separate persistent data outside the application checkout and Docker image. Employee-test videos remain in the `employee_test_recordings/` subfolder and retain their `<test-id>.webm` names, which the API uses to associate each video with its database test/employee record.
 
-Before recreating the API container, deployment copies the existing `/app/uploads` contents from its current Docker volume into the matching `/opt/recordings/<environment>` directory. This is a copy, not a destructive move: the old volume is retained as a recovery copy, and subsequent builds/redeployments do not sync or delete files from `/opt/recordings`. Verify the recordings in the application before manually removing any old Docker volume.
+Before recreating the API container, deployment copies the existing `/app/uploads` contents from its current Docker volume into the matching environment directory. This is a copy, not a destructive move: the old volume is retained as a recovery copy, and subsequent builds/redeployments do not sync or delete files from either recordings directory. Verify the recordings in the application before manually removing any old Docker volume.
+
+The VM host ports remain `8001` for the development API and `8000` for production;
+both containers listen on port `8000` internally. The development and production UI
+ports remain `3001` and `3000`, respectively. The shared Python AI service remains on
+host port `10000`.
 
 Development Employee Portal exports use the production API as their source so the detailed Excel export and summary use the same employee data and mapping as production. Set `PORTAL_EXPORT_API_URL` in the development environment file to the production API base URL (HTTPS, without a trailing path to the export endpoint). The dev deployment can proceed without this setting, but its portal exports return an explicit configuration error until it is set; they never silently fall back to development data. The dev API forwards the signed-in admin's bearer token, and production performs its normal authentication and permission checks; the admin token signing secret and account permissions must therefore be valid in both environments. If the production API rejects the token or is unavailable, the export fails. Production exports continue to use their local production data.
 

@@ -12,9 +12,17 @@ case "$environment" in
     ;;
 esac
 
-target="/opt/recordings/$environment"
+case "$environment" in
+  dev)
+    target="/opt/recordings/dev"
+    marker="/opt/recordings/.dev-uploads-migrated"
+    ;;
+  prod)
+    target="/opt/recording/prod"
+    marker="/opt/recording/.prod-uploads-migrated"
+    ;;
+esac
 sudo install -d -m 0750 "$target"
-marker="/opt/recordings/.${environment}-uploads-migrated"
 
 if [[ -f "$marker" ]]; then
   echo "The $environment uploads migration has already been completed."
@@ -33,9 +41,17 @@ else
   if source="$(docker volume inspect --format='{{.Mountpoint}}' "$legacy_volume" 2>/dev/null)"; then
     :
   else
-    echo "No legacy upload volume found for $environment; preparing an empty persistent directory."
-    sudo install -m 0600 /dev/null "$marker"
-    exit 0
+    legacy_directory=""
+    if [[ "$environment" == "prod" && -d /opt/recordings/prod ]]; then
+      legacy_directory=/opt/recordings/prod
+    fi
+    if [[ -n "$legacy_directory" ]]; then
+      source="$legacy_directory"
+    else
+      echo "No legacy upload volume found for $environment; preparing an empty persistent directory."
+      sudo install -m 0600 /dev/null "$marker"
+      exit 0
+    fi
   fi
 fi
 
