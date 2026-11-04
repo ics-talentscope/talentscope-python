@@ -24,7 +24,7 @@ ENV_FILE="${ENV_FILE:-$DEPLOY_ROOT/.env.local}"
 COMPOSE_FILE="${COMPOSE_FILE:-$DEPLOY_ROOT/docker-compose.azure.yml}"
 RECORDINGS_ENV=dev
 RECORDINGS_PATH=/opt/recordings/dev
-LOG_HOST_DIR=/opt/logs/dev
+LOG_HOST_DIR=/opt/logs
 API_COMPOSE_FILE="$APP_DIR/compose.api.yml"
 API_SECURITY_COMPOSE_FILE="$APP_DIR/compose.api.security.yml"
 COMPOSE_OVERRIDE="$APP_DIR/compose.recordings.yml"
@@ -50,7 +50,8 @@ fi
 DB_MIGRATION_COUNT="$(find "$SRC/db" -type f -name '*.sql' | wc -l)"
 [[ "$DB_MIGRATION_COUNT" -gt 0 ]] || { echo "No SQL database migrations found in $SRC/db." >&2; exit 1; }
 
-sudo install -d -m 0750 "$LOG_HOST_DIR"
+sudo install -d -m 0755 "$LOG_HOST_DIR"
+sudo install -d -m 0750 "$LOG_HOST_DIR/dev"
 LOG_COMPOSE_DIR="$(mktemp -d)"
 LOG_COMPOSE_FILE="$LOG_COMPOSE_DIR/docker-compose.logging.yml"
 trap 'rm -f "$LOG_COMPOSE_FILE"; rmdir "$LOG_COMPOSE_DIR"' EXIT
@@ -90,10 +91,12 @@ COMPOSE=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE" -f "$API_COMPO
   echo "Compose service '$SERVICE' was not found in $COMPOSE_FILE." >&2
   exit 1
 }
-"${COMPOSE[@]}" config --images | grep -Fxq "$IMAGE" || {
+CONFIGURED_IMAGES="$("${COMPOSE[@]}" config --images)"
+if ! grep -Fxq "$IMAGE" <<<"$CONFIGURED_IMAGES"; then
   echo "Compose service '$SERVICE' must use image $IMAGE." >&2
+  printf 'Configured images:\n%s\n' "$CONFIGURED_IMAGES" >&2
   exit 1
-}
+fi
 
 PREVIOUS_CONTAINER="$("${COMPOSE[@]}" ps -q "$SERVICE" || true)"
 PREVIOUS_IMAGE_REF=""
