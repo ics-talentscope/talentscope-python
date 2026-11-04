@@ -207,6 +207,163 @@ def portal_workbook(employees: list[dict], attempts_by_test: dict[str, list[dict
     return to_bytes(wb)
 
 
+def portal_summary_workbook(detail_workbook: bytes, source_name: str) -> bytes:
+    from collections import defaultdict
+
+    detail = load_workbook(io.BytesIO(detail_workbook), read_only=True, data_only=True)
+    if "Employee Portal Results" not in detail.sheetnames:
+        raise ValueError("Detailed Employee Portal export is missing its results sheet.")
+    source_sheet = detail["Employee Portal Results"]
+    header = [_cell_text(cell) for cell in next(source_sheet.iter_rows(min_row=1, max_row=1, values_only=True))]
+    columns = {name: index for index, name in enumerate(header)}
+    required = ("Employee ID", "Domain", "Product", "Test Status")
+    missing = [name for name in required if name not in columns]
+    if missing:
+        raise ValueError(f"Detailed Employee Portal export is missing columns: {', '.join(missing)}")
+
+    records = []
+    for row in source_sheet.iter_rows(min_row=2, values_only=True):
+        employee_id = _cell_text(row[columns["Employee ID"]] if columns["Employee ID"] < len(row) else "")
+        if not employee_id:
+            continue
+        records.append({
+            "employee_id": employee_id,
+            "domain": _cell_text(row[columns["Domain"]] if columns["Domain"] < len(row) else "") or "—",
+            "product": _cell_text(row[columns["Product"]] if columns["Product"] < len(row) else "") or "—",
+            "status": _cell_text(row[columns["Test Status"]] if columns["Test Status"] < len(row) else "").casefold(),
+        })
+    detail.close()
+
+    def counts(members: list[dict]) -> dict:
+        completed = sum(member["status"] == "completed" for member in members)
+        in_progress = sum(member["status"] in {"in progress", "pending"} for member in members)
+        not_started = sum(member["status"] == "not started" for member in members)
+        scheduled = completed + in_progress + not_started
+        return {
+            "scheduled": scheduled,
+            "completed": completed,
+            "in_progress": in_progress,
+            "not_started": not_started,
+            "completion": round(completed / scheduled * 100, 1) if scheduled else 0,
+        }
+
+    wb = Workbook()
+    overview = wb.active
+    overview.title = "Summary"
+    overview.append(["TalentScope Employee Portal — Status Summary"])
+    overview.merge_cells("A1:B1")
+    overview.append([f"Source: {source_name} | Total people scheduled: {counts(records)['scheduled']}"])
+    overview.merge_cells("A2:B2")
+    overview["A1"].font = Font(bold=True, color="FF1F4E79", underline="single")
+    overview["A2"].font = Font(italic=True, color="FF1F4E79")
+    overview.append([])
+    overview.append(["Overall"])
+    overview["A4"].font = Font(bold=True, color="FF1F4E79")
+    overview.append(["Metric", "Count"])
+    for cell in overview[5]:
+        cell.font = Font(bold=True, color="FFFFFFFF")
+        cell.fill = PatternFill("solid", fgColor="FF4F46E5")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    totals = counts(records)
+    for label, value in (
+        ("Total Scheduled", totals["scheduled"]),
+        ("Completed (took the test)", totals["completed"]),
+        ("In Progress", totals["in_progress"]),
+        ("Not Started", totals["not_started"]),
+        ("Completion %", totals["completion"] / 100),
+    ):
+        overview.append([label, value])
+    overview["B7"].fill = PatternFill("solid", fgColor="FFD9FBE8")
+    overview["B9"].fill = PatternFill("solid", fgColor="FFFFF2CC")
+    overview["B10"].number_format = "0.0%"
+    overview.column_dimensions["A"].width = 38
+    overview.column_dimensions["B"].width = 16
+    overview.freeze_panes = "A5"
+    _borders(overview)
+
+    def add_breakdown(title: str, key: str, note: str) -> None:
+        sheet = wb.create_sheet(title)
+        sheet.append([f"Counts by {title.removeprefix('By ')}"])
+        sheet.append([note])
+        sheet.append([])
+        sheet.append([title.removeprefix("By "), "Scheduled", "Completed", "In Progress", "Not Started", "Completion %"])
+        for cell in sheet[4]:
+            cell.font = Font(bold=True, color="FFFFFFFF")
+            cell.fill = PatternFill("solid", fgColor="FF4F46E5")
+            cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        groups: dict[str, list[dict]] = defaultdict(list)
+        for record in records:
+            groups[record[key]].append(record)
+        ordered = sorted(groups.items(), key=lambda item: (-counts(item[1])["scheduled"], item[0].casefold()))
+        for label, members in ordered:
+            group = counts(members)
+            sheet.append([label, group["scheduled"], group["completed"], group["in_progress"], group["not_started"], group["completion"]])
+            sheet.cell(row=sheet.max_row, column=3).fill = PatternFill("solid", fgColor="FFD9FBE8")
+            sheet.cell(row=sheet.max_row, column=5).fill = PatternFill("solid", fgColor="FFFFF2CC")
+            sheet.cell(row=sheet.max_row, column=6).number_format = "0.0"
+        total_row = counts(records)
+        sheet.append(["TOTAL", total_row["scheduled"], total_row["completed"], total_row["in_progress"],
+                      total_row["not_started"], total_row["completion"]])
+        for cell in sheet[sheet.max_row]:
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill("solid", fgColor="FFF1F5F9")
+        sheet.cell(row=sheet.max_row, column=6).number_format = "0.0"
+        sheet.column_dimensions["A"].width = 34
+        for column in range(2, 7):
+            sheet.column_dimensions[get_column_letter(column)].width = 18
+        sheet.freeze_panes = "B5"
+        _borders(sheet)
+
+    add_breakdown("By Domain", "domain", "Scheduled = assigned on portal. Completed = took/finished the test.")
+    add_breakdown("By Product", "product", "Use this sheet for TPM Upskilling / MSS-MGW / SBC etc.")
+
+    cross = wb.create_sheet("Domain x Product")
+    cross.append(["Counts by Domain and Product"])
+    cross.append([])
+    cross.append(["Domain", "Product", "Scheduled", "Completed", "In Progress", "Not Started", "Completion %"])
+    for cell in cross[3]:
+        cell.font = Font(bold=True, color="FFFFFFFF")
+        cell.fill = PatternFill("solid", fgColor="FF4F46E5")
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+    pairs: dict[tuple[str, str], list[dict]] = defaultdict(list)
+    for record in records:
+        pairs[(record["domain"], record["product"])].append(record)
+    for domain, product in sorted(pairs, key=lambda pair: (pair[0].casefold(), pair[1].casefold())):
+        group = counts(pairs[(domain, product)])
+        cross.append([domain, product, group["scheduled"], group["completed"], group["in_progress"],
+                      group["not_started"], group["completion"]])
+        cross.cell(row=cross.max_row, column=7).number_format = "0.0"
+    cross.column_dimensions["A"].width = 28
+    cross.column_dimensions["B"].width = 28
+    for column in range(3, 8):
+        cross.column_dimensions[get_column_letter(column)].width = 18
+    cross.freeze_panes = "C4"
+    _borders(cross)
+
+    instructions = wb.create_sheet("How to use")
+    for row in (
+        ["How to refresh this summary"],
+        [""],
+        ["1. In TalentScope Admin -> Employee Portal, click Export Summary."],
+        ["2. The summary is calculated from the same Employee Portal Results data as Export to Excel."],
+        ["3. Click Export to Excel if you also need employee and question-level details."],
+        ["4. Use the By Domain, By Product, and Domain x Product sheets for breakdowns."],
+        ["5. Use the By Product sheet to review a specific product."],
+        [""],
+        ["Status meanings:"],
+        ["- Scheduled = person appears on the portal with an assignment (total rows)."],
+        ["- Completed = took and finished the test."],
+        ["- In Progress = started but not finished (includes partial-answer Pending status)."],
+        ["- Not Started = assigned but has not begun."],
+    ):
+        instructions.append(row)
+    instructions["A1"].font = Font(bold=True, size=12, color="FF1F4E79", underline="single")
+    instructions.column_dimensions["A"].width = 110
+    instructions.freeze_panes = "A3"
+    _borders(instructions)
+    return to_bytes(wb)
+
+
 def bucket_scores(scores: list[int]) -> dict:
     counts = {"rejected": 0, "evaluate": 0, "l1": 0, "shortlisted": 0, "total": len(scores)}
     for score in scores:

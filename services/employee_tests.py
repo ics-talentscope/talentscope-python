@@ -1,4 +1,5 @@
 import logging
+import random
 import re
 import threading
 import time
@@ -15,6 +16,8 @@ SWEEP_INTERVAL_S = 120
 
 MAX_VIOLATIONS = 3
 VIOLATION_COOLDOWN_MS = 2500
+# Face Missing flicker was burning 3 strikes in ~15s and auto-submitting fair attempts.
+FACE_MISSING_COOLDOWN_MS = 45_000
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 
 
@@ -76,19 +79,42 @@ def normalize_proctoring(raw) -> dict:
 
 
 def record_violation(existing: dict, violation_type: str, detail=None, category=None, severity=None) -> dict:
-    last = _ms(existing["lastViolationAt"]) if existing.get("lastViolationAt") else 0
-    if last and datetime.now(timezone.utc).timestamp() * 1000 - last < VIOLATION_COOLDOWN_MS:
-        return existing
-    count = min(MAX_VIOLATIONS, (existing.get("warningCount") or 0) + 1)
+    t = (violation_type or "").lower()
+    is_face_missing = "face missing" in t or "face not" in t
+    now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    # Keep Face Missing cooldown separate so it cannot suppress hard strikes.
+    if is_face_missing:
+        last_face = _ms(existing.get("lastFaceMissingAt")) if existing.get("lastFaceMissingAt") else 0
+        if last_face and now_ms - last_face < FACE_MISSING_COOLDOWN_MS:
+            return existing
+    else:
+        last = _ms(existing["lastViolationAt"]) if existing.get("lastViolationAt") else 0
+        if last and now_ms - last < VIOLATION_COOLDOWN_MS:
+            return existing
     cls = classify(violation_type)
     now = _now()
+    entry = {
+        "type": violation_type[:120],
+        "timestamp": now,
+        "category": category or cls["category"],
+        "severity": severity or cls["severity"],
+        "detail": detail[:240] if detail else None,
+    }
+    # Face Missing is log-only: browser face models often false-negative while the
+    # recorded video clearly shows the candidate. Do NOT burn strike / auto-submit.
+    if is_face_missing:
+        return {
+            **existing,
+            "lastFaceMissingAt": now,
+            "faceMissingEvents": int(existing.get("faceMissingEvents") or 0) + 1,
+            "violations": [*existing["violations"], entry],
+        }
+    count = min(MAX_VIOLATIONS, (existing.get("warningCount") or 0) + 1)
     return {
         **existing, "warningCount": count,
         "autoSubmitted": bool(existing.get("autoSubmitted")) or count >= MAX_VIOLATIONS,
         "lastViolationAt": now,
-        "violations": [*existing["violations"], {
-            "type": violation_type[:120], "timestamp": now, "category": category or cls["category"],
-            "severity": severity or cls["severity"], "detail": detail[:240] if detail else None}],
+        "violations": [*existing["violations"], entry],
     }
 
 
@@ -186,6 +212,41 @@ def reset_test(test_id: str) -> None:
         "session_recording_url": None, "proctoring": None, "score_correct": None, "score_total": None,
         "score_percent": None, "ai_analysis": None}, {"id": test_id})
     test_video.delete(test_id)
+    shuffle_questions(test_id)
+
+
+def shuffle_questions(test_id: str) -> None:
+    store = get_store()
+    questions = questions_for(test_id)
+    if not questions:
+        return
+
+    rng = random.SystemRandom()
+    order = list(questions)
+    rng.shuffle(order)
+    offset = max(int(q["question_index"]) for q in questions) + len(questions) + 1
+    for index, question in enumerate(order):
+        store.update("test_questions", {"question_index": offset + index}, {"id": question["id"]})
+
+    for index, question in enumerate(order):
+        choices = list(enumerate(question.get("options") or []))
+        rng.shuffle(choices)
+        correct_index = question.get("correct_option_index")
+        correct_option_index = next(
+            (i for i, (original_index, _) in enumerate(choices) if original_index == correct_index),
+            None,
+        )
+        if correct_option_index is None:
+            raise ValueError(f"Question {question['id']} has an invalid correct option index.")
+        store.update(
+            "test_questions",
+            {
+                "question_index": index,
+                "options": [option for _, option in choices],
+                "correct_option_index": correct_option_index,
+            },
+            {"id": question["id"]},
+        )
 
 
 def regenerate_questions(test: dict) -> None:
@@ -198,6 +259,7 @@ def regenerate_questions(test: dict) -> None:
     store.delete("test_questions", {"test_id": test_id})
     generated = question_bank.fetch_questions(test.get("subject_title") or "", test.get("topic_title") or test["topic_id"], difficulty)
     store.insert("test_questions", question_bank.to_rows(test_id, generated, test["topic_id"], test.get("topic_title") or "", difficulty))
+    shuffle_questions(test_id)
 
 
 def _option_label(index: int) -> str:
@@ -215,6 +277,8 @@ def question_attempts_batch(test_ids: list[str]) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {i: [] for i in ids}
     for q in sorted(questions, key=lambda r: (r["test_id"], r["question_index"])):
         attempt = by_question.get(str(q["id"]))
+        if not attempt:
+            continue
         selected = attempt.get("selected_option_index") if attempt else None
         options = q.get("options") or []
         text = f"{_option_label(selected)}) {options[selected]}" if selected is not None and 0 <= selected < len(options) else None

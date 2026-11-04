@@ -1,0 +1,6 @@
+services:
+  python:
+    cap_drop: !override
+      - ALL
+    security_opt: !override
+      - no-new-privileges:true

@@ -2,21 +2,27 @@ import json
 import re
 import struct
 import threading
+import time
+import traceback
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable, Optional, Union
 
 from core.config import db_target, env, mssql_settings, supabase_settings
+from core.logger import logger
+from core import request_context
 
 JSON_COLUMNS = {
     "employees": {"badges"},
     "tests": {"in_progress", "proctoring", "ai_analysis"},
     "test_questions": {"options"},
+    "employee_portal_question_bank": {"options"},
     "portal_settings": {"value"},
     "evaluations": {"bloom_scores", "bloom_submissions", "bloom_graded"},
     "candidate_interview_data": {"evaluation"},
     "question_sets": {"items"},
+    "system_logs": {"request_payload", "response_payload"},
 }
 
 POSTGRES_JSON_COLUMNS = {
@@ -24,11 +30,13 @@ POSTGRES_JSON_COLUMNS = {
     "portal_settings": {"value"},
     "employees": {"badges"},
     "tests": {"in_progress", "proctoring", "ai_analysis"},
+    "employee_portal_question_bank": {"options"},
     "audit_logs": {"details"},
     "candidate_interview_data": {"evaluation"},
     "test_questions": {"options"},
     "evaluations": {"bloom_scores", "bloom_submissions", "bloom_graded"},
     "question_sets": {"items"},
+    "system_logs": {"request_payload", "response_payload"},
 }
 
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -158,6 +166,77 @@ class Store:
         raise NotImplementedError
 
 
+def _database_operation(statement: str) -> tuple[str, str | None]:
+    operation_match = re.match(r"\s*(SELECT|INSERT|UPDATE|DELETE|MERGE|EXEC(?:UTE)?)\b", statement, re.I)
+    if not operation_match:
+        return "QUERY", None
+    operation = operation_match.group(1).upper().replace("EXECUTE", "EXEC")
+    clause = {"SELECT": "FROM", "INSERT": "INTO", "UPDATE": "UPDATE", "DELETE": "FROM", "MERGE": "INTO"}.get(operation)
+    if not clause:
+        return operation, None
+    table_match = re.search(
+        rf"\b{clause}\b\s+(?:\[dbo\]\.)?\[?([A-Za-z_][A-Za-z0-9_]*)\]?",
+        statement,
+        re.I,
+    )
+    return operation, table_match.group(1) if table_match else None
+
+
+def _log_database_operation(
+    operation: str,
+    table: str | None,
+    started: float,
+    error: Exception | None = None,
+) -> None:
+    if table and table.lower() == "system_logs":
+        return
+    failed = error is not None
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+    level = "ERROR" if failed else "INFO"
+    if not failed and elapsed_ms > 3000:
+        level = "CRITICAL"
+    elif not failed and elapsed_ms > 1000:
+        level = "WARNING"
+    fields = {
+        "module": "database",
+        "action": operation.lower(),
+        "table": table,
+        "execution_time_ms": elapsed_ms,
+        "status": "failed" if failed else "success",
+        "request_id": request_context.request_id(),
+    }
+    logger_fields = {
+        "module": "database",
+        "action": operation.lower(),
+        "db_operation": operation,
+        "table_name": table,
+        "execution_time": elapsed_ms,
+        "status": "failed" if failed else "success",
+        **request_context.log_context(),
+    }
+    if failed:
+        logger.bind(**fields).opt(exception=(type(error), error, error.__traceback__)).error(
+            "Database operation failed"
+        )
+    else:
+        logger.bind(**fields).log(level, "Database operation completed")
+    try:
+        from services.system_logs import record_log
+
+        record_log({
+            **logger_fields,
+            "db_operation": operation,
+            "log_level": level,
+            "message": f"{operation} operation on {table or 'unknown table'}",
+            "error_message": str(error) if error else None,
+            "stack_trace": "".join(traceback.format_exception(error)) if error else None,
+        })
+    except Exception:
+        logger.bind(module="logging", action="database_event_failed").exception(
+            "Could not persist database operation event"
+        )
+
+
 def _dto_converter(raw: bytes) -> datetime:
     t = struct.unpack("<6hI2h", raw)
     return datetime(t[0], t[1], t[2], t[3], t[4], t[5], t[6] // 1000,
@@ -252,32 +331,41 @@ class MssqlStore(Store):
             state = str(err.args[0]) if err.args else ""
             return state.startswith("08") or state in {"HY000", "HYT00", "01000"}
 
-        for attempt in (0, 1):
-            try:
-                conn = self._acquire()
-            except pyodbc.Error as err:
-                if attempt == 0 and transient(err):
-                    continue
-                raise
-            broken = False
-            try:
-                cursor = conn.cursor()
-                cursor.execute(sql, params)
-                if fetch and cursor.description:
-                    names = [d[0] for d in cursor.description]
-                    rows = [dict(zip(names, r)) for r in cursor.fetchall()]
+        started = time.perf_counter()
+        operation, table = _database_operation(sql)
+        error = None
+        try:
+            for attempt in (0, 1):
+                try:
+                    conn = self._acquire()
+                except pyodbc.Error as err:
+                    if attempt == 0 and transient(err):
+                        continue
+                    raise
+                broken = False
+                try:
+                    cursor = conn.cursor()
+                    cursor.execute(sql, params)
+                    if fetch and cursor.description:
+                        names = [d[0] for d in cursor.description]
+                        rows = [dict(zip(names, r)) for r in cursor.fetchall()]
+                        cursor.close()
+                        return rows
+                    count = cursor.rowcount
                     cursor.close()
-                    return rows
-                count = cursor.rowcount
-                cursor.close()
-                return count
-            except pyodbc.Error as err:
-                broken = transient(err)
-                if attempt == 0 and broken:
-                    continue
-                raise
-            finally:
-                self._release(conn, broken)
+                    return count
+                except pyodbc.Error as err:
+                    broken = transient(err)
+                    if attempt == 0 and broken:
+                        continue
+                    raise
+                finally:
+                    self._release(conn, broken)
+        except Exception as exc:
+            error = exc
+            raise
+        finally:
+            _log_database_operation(operation, table, started, error)
 
     def query(self, sql: str, params: tuple = ()) -> list[dict]:
         return [decode_row("", r) for r in self._run(sql, params, True)]
@@ -456,20 +544,32 @@ class SupabaseStore(Store):
         return name
 
     def _request(self, method: str, table: str, params=None, payload=None, prefer: str | None = None):
+        started = time.perf_counter()
+        operation = {
+            "GET": "SELECT", "HEAD": "SELECT", "POST": "INSERT",
+            "PATCH": "UPDATE", "DELETE": "DELETE",
+        }.get(method, method)
         table_path = self._table(table)
         headers = {"Prefer": prefer} if prefer else None
-        response = self.client.request(
-            method,
-            table_path,
-            params=params,
-            json=payload,
-            headers=headers,
-        )
-        response.raise_for_status()
-        if response.status_code == 204 or not response.content:
-            return response, []
-        data = response.json()
-        return response, data if isinstance(data, list) else [data]
+        error = None
+        try:
+            response = self.client.request(
+                method,
+                table_path,
+                params=params,
+                json=payload,
+                headers=headers,
+            )
+            response.raise_for_status()
+            if response.status_code == 204 or not response.content:
+                return response, []
+            data = response.json()
+            return response, data if isinstance(data, list) else [data]
+        except Exception as exc:
+            error = exc
+            raise
+        finally:
+            _log_database_operation(operation, table_path, started, error)
 
     def query(self, sql: str, params: tuple = ()) -> list[dict]:
         raise NotImplementedError("Raw SQL is not supported by the Supabase Data API")

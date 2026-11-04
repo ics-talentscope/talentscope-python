@@ -38,6 +38,23 @@ def _mark_video_ready(test: dict, url: str) -> None:
     get_store().update("tests", {"session_recording_url": url, "proctoring": proctoring}, {"id": test["id"]})
 
 
+def _employee_questions(test: dict) -> tuple[list[dict], list[dict]]:
+    questions = et.questions_for(test["id"])
+    if test.get("status") != "completed":
+        return [
+            {key: value for key, value in question.items() if key not in ("correct_option_index", "explanation")}
+            for question in questions
+        ], []
+
+    attempts = get_store().select(
+        "test_attempts",
+        {"test_id": test["id"]},
+        ["id", "question_id", "selected_option_index", "is_correct", "time_taken_seconds", "created_at"],
+    )
+    attempted_ids = {str(attempt["question_id"]) for attempt in attempts}
+    return [question for question in questions if str(question["id"]) in attempted_ids], attempts
+
+
 @router.get("")
 def list_tests(request: Request):
     code = employee_id_from_request(request)
@@ -69,13 +86,9 @@ def get_test(test_id: str, employee: dict = Depends(require_employee)):
         if (accounts.is_assessment_only_employee(employee) and topic != accounts.PRODUCT_ASSESSMENT_TOPIC_ID
                 and not accounts.is_product_assessment_history_topic(topic)):
             return json_error(403, "Forbidden")
-        questions = et.questions_for(test["id"])
+        questions, attempts = _employee_questions(test)
         if not questions and test.get("status") != "completed":
             return json_error(400, "This assessment has no questions assigned yet. Please contact your administrator.")
-        attempts = []
-        if test.get("status") == "completed":
-            attempts = get_store().select("test_attempts", {"test_id": test["id"]},
-                                          ["id", "question_id", "selected_option_index", "is_correct", "time_taken_seconds", "created_at"])
         write_log("employee", "EMPLOYEE_TEST_OPENED", "success", f"{employee['employee_id']} opened test {test['id']} ({test.get('topic_title') or topic})")
         return {"test": _title(test), "questions": questions, "attempts": attempts, "has_recording": test_video.exists(test["id"])}
     except Exception as err:
@@ -133,7 +146,9 @@ def start_test(test_id: str, employee: dict = Depends(require_employee)):
         test = _owned(test_id, employee)
         if not test:
             return json_error(404, "Test not found")
-        questions = et.questions_for(test["id"])
+        if test.get("status") == "completed":
+            return json_error(409, "Test already submitted.")
+        questions, _ = _employee_questions(test)
         if not questions:
             return json_error(400, "Test has no questions")
         return {"test": test, "questions": questions, "total": len(questions)}
@@ -159,17 +174,22 @@ def submit_test(test_id: str, body: dict = Body(default_factory=dict), employee:
             accuracy = test.get("score_percent")
             if accuracy is None:
                 accuracy = round(correct / total * 100) if total else 0
+            review_questions, review_attempts = _employee_questions(test)
             return {"success": True, "alreadyCompleted": True, "testId": test["id"], "total": total, "correct": correct,
-                    "accuracy": accuracy, "ai_analysis": test.get("ai_analysis")}
+                    "accuracy": accuracy, "ai_analysis": test.get("ai_analysis"),
+                    "questions": review_questions, "attempts": review_attempts}
         ok, error, code = et.can_submit(test)
         if not auto and not ok and code == "NOT_STARTED":
             return json_error(400, error)
         result = et.finalize(test, accounts.employee_uuid(employee["employee_id"]), answers, auto)
         test_backup.snapshot(test["id"], "submit")
+        completed_test = get_store().first("tests", {"id": test["id"]})
+        review_questions, review_attempts = _employee_questions(completed_test)
         correct, total, accuracy = result["correct"], result["total"], result["accuracy"]
         write_log("employee", "EMPLOYEE_TEST_SUBMITTED", "success",
                   f"{employee['employee_id']} submitted test {test['id']}: {correct}/{total} ({accuracy}%){' [auto-submitted]' if auto else ''}")
-        return {"success": True, "testId": test["id"], "total": total, "correct": correct, "accuracy": accuracy, "ai_analysis": None}
+        return {"success": True, "testId": test["id"], "total": total, "correct": correct, "accuracy": accuracy,
+                "ai_analysis": None, "questions": review_questions, "attempts": review_attempts}
     except Exception as err:
         return public_error(err, "Internal error")
 

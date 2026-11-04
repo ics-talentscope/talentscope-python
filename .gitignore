@@ -3,6 +3,9 @@ __pycache__/
 .venv/
 venv/
 uploads/
+/recordings/*
+!/recordings/.gitkeep
+/logs/
 *.py[cod]
 .env
 .env.*

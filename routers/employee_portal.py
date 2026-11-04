@@ -157,10 +157,43 @@ def analytics(employee: dict = Depends(require_employee)):
         done_ids = {t["id"] for t in completed}
         attempts = [a for a in store.select("test_attempts", {"employee_id": uid}, ["test_id", "is_correct"]) if a["test_id"] in done_ids]
         correct_total = sum(1 for a in attempts if a["is_correct"])
-        average = js_round(correct_total / len(attempts) * 100) if total_tests > 0 and attempts else 0
+        # Prefer stored test scores. Auto-submit / partial attempt rows can make
+        # correct/attempts look like 100% while score_percent is e.g. 3/25 = 12%.
+        stored_scores: list[float] = []
+        for t in completed:
+            if t.get("score_percent") is not None:
+                try:
+                    stored_scores.append(float(t["score_percent"]))
+                    continue
+                except (TypeError, ValueError):
+                    pass
+            total_q = int(t.get("total_questions") or 0)
+            if t.get("score_correct") is not None and total_q > 0:
+                try:
+                    stored_scores.append(100.0 * float(t["score_correct"]) / total_q)
+                except (TypeError, ValueError):
+                    pass
+        if stored_scores:
+            average = js_round(sum(stored_scores) / len(stored_scores))
+        else:
+            average = js_round(correct_total / len(attempts) * 100) if total_tests > 0 and attempts else 0
         hours = js_round(sum((t.get("total_questions") or 0) * 2 for t in completed) / 60)
 
         def stats(test_ids: set) -> tuple[int, int]:
+            # Prefer scored test rows over sparse attempt logs for the same reason as average.
+            scored = [t for t in completed if t["id"] in test_ids]
+            if scored and any(t.get("score_percent") is not None or t.get("score_correct") is not None for t in scored):
+                correct = 0
+                total = 0
+                for t in scored:
+                    total_q = int(t.get("total_questions") or 0) or 25
+                    if t.get("score_correct") is not None:
+                        correct += int(t["score_correct"] or 0)
+                        total += total_q
+                    elif t.get("score_percent") is not None:
+                        correct += int(round(float(t["score_percent"]) * total_q / 100.0))
+                        total += total_q
+                return correct, total
             rel = [a for a in attempts if a["test_id"] in test_ids]
             return sum(1 for a in rel if a["is_correct"]), len(rel)
 
@@ -174,6 +207,34 @@ def analytics(employee: dict = Depends(require_employee)):
             pct = js_round(correct / count * 100) if count else 0
             breakdown.append({"subject_id": subject["id"], "subject_title": subject["title"], "average_pct": pct,
                               "mastery_pct": len(mine) if pct >= 80 else 0, "topic_count": len(mine)})
+
+        # Product assessments use subject_id like "resource-subject" (not in learning_subjects).
+        # Surface them so Strongest/Weakest and readiness subject avg aren't empty.
+        if not any((s.get("topic_count") or 0) > 0 for s in breakdown):
+            by_title: dict = {}
+            for t in completed:
+                title = (t.get("topic_title") or t.get("subject_title") or "Product Assessment").strip() or "Product Assessment"
+                by_title.setdefault(title, []).append(t)
+            for title, mine in by_title.items():
+                correct, count = stats({t["id"] for t in mine})
+                pct = js_round(correct / count * 100) if count else 0
+                if pct == 0 and mine:
+                    # Fall back to stored score_percent average for this product group.
+                    vals = []
+                    for t in mine:
+                        if t.get("score_percent") is not None:
+                            vals.append(float(t["score_percent"]))
+                        elif t.get("score_correct") is not None and (t.get("total_questions") or 0) > 0:
+                            vals.append(100.0 * float(t["score_correct"]) / float(t["total_questions"]))
+                    if vals:
+                        pct = js_round(sum(vals) / len(vals))
+                breakdown.append({
+                    "subject_id": f"product:{title}",
+                    "subject_title": title,
+                    "average_pct": pct,
+                    "mastery_pct": len(mine) if pct >= 80 else 0,
+                    "topic_count": len(mine),
+                })
 
         weeks: dict = {}
         for t in completed:
@@ -208,6 +269,8 @@ def analytics(employee: dict = Depends(require_employee)):
         return {
             "total_tests_taken": total_tests, "average_score": average, "total_learning_hours": hours,
             "ai_readiness_score": readiness, "skill_level": portal.skill_level(readiness),
+            # Keep XP aligned with readiness for assessment-only dashboards (was falling back in UI).
+            "xp_points": readiness,
             "strongest_subject": pick(ranked[0]) if ranked and ranked[0]["topic_count"] > 0 else None,
             "weakest_subject": pick(ranked[-1]) if ranked and ranked[-1]["topic_count"] > 0 else None,
             "score_history": [{"date": r["completed_at"], "score": r["accuracy_pct"]} for r in recent_results],

@@ -18,7 +18,8 @@ PRODUCT_ASSESSMENT_HISTORY_TOPIC_ID = "resource-product-assessment-history"
 
 COLUMNS = [
     "employee_id", "full_name", "email", "department", "role", "is_first_login", "password_hash", "password_salt",
-    "xp_points", "streak_days", "skill_level", "ai_readiness_score", "product", "product_qb_eligible", "assessment_only",
+    "xp_points", "streak_days", "skill_level", "ai_readiness_score", "product", "designation", "product_qb_eligible",
+    "assessment_only", "email_verified",
 ]
 
 
@@ -46,7 +47,9 @@ def map_row(row: dict) -> dict:
         "email": str(row.get("email") or ""),
         "department": str(row.get("department") or "general"),
         "role": str(row.get("role") or "employee"),
+        "designation": str(row.get("designation") or ""),
         "is_first_login": bool(row.get("is_first_login") or False),
+        "email_verified": bool(row.get("email_verified") or False),
         "password_hash": row.get("password_hash") or None,
         "password_salt": row.get("password_salt") or None,
         "xp_points": _int(row.get("xp_points")),
@@ -80,13 +83,39 @@ def get_account(employee_id: str) -> Optional[dict]:
     return map_row(row) if row else None
 
 
-def get_account_by_email(email: str) -> Optional[dict]:
+def _email_lookup_candidates(email: str) -> list[str]:
+    """Exact email plus Infinite <-> Nokia.ext roster aliases used by SSO."""
     clean = (email or "").strip().lower()
-    if not clean:
-        return None
-    # Case-insensitive match (SQL Server CI collations treat LIKE as CI without wildcards).
-    row = get_store().first("employees", [("email", "ilike", clean)], COLUMNS)
-    return map_row(row) if row else None
+    if not clean or "@" not in clean:
+        return [clean] if clean else []
+    local, _, domain = clean.partition("@")
+    out = [clean]
+    if domain == "infinite.com":
+        out.append(f"{local}.ext@nokia.com")
+        out.append(f"{local}@nokia.com")
+    elif domain == "nokia.com":
+        if local.endswith(".ext"):
+            out.append(f"{local[:-4]}@infinite.com")
+        else:
+            out.append(f"{local}@infinite.com")
+            out.append(f"{local}.ext@nokia.com")
+    # Preserve order, drop dupes.
+    seen: set[str] = set()
+    uniq: list[str] = []
+    for item in out:
+        if item and item not in seen:
+            seen.add(item)
+            uniq.append(item)
+    return uniq
+
+
+def get_account_by_email(email: str) -> Optional[dict]:
+    for candidate in _email_lookup_candidates(email):
+        # Case-insensitive match (SQL Server CI collations treat LIKE as CI without wildcards).
+        row = get_store().first("employees", [("email", "ilike", candidate)], COLUMNS)
+        if row:
+            return map_row(row)
+    return None
 
 
 def upsert_account(account: dict) -> bool:
@@ -98,6 +127,8 @@ def upsert_account(account: dict) -> bool:
         "department": account.get("department") or "general",
         "role": account.get("role") or "employee",
         "product": account.get("product"),
+        "designation": account.get("designation") or "",
+        "email_verified": bool(account.get("email_verified", False)),
         "is_first_login": bool(account.get("is_first_login", False)),
         "password_hash": account.get("password_hash"),
         "password_salt": account.get("password_salt"),

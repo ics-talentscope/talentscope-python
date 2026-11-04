@@ -14,6 +14,7 @@ This directory contains the database schema migrations, optional baseline datase
 | `scripts/deploy-data.ts` | Data deployment engine (inserts or upserts baseline datasets into target DB) |
 | `scripts/bootstrap.ts` | Creates the database instance if it does not yet exist |
 | `scripts/lib/mssql.ts` | Database connection pool configuration and target resolution |
+| `mssql/migrations/005_system_logs.sql` | Structured application/request/database log storage |
 | `supabase/config.toml` | Supabase CLI local-development configuration |
 | `supabase/migrations/*.sql` | PostgreSQL schema migrations for Supabase |
 | `postgres/migrations/*.sql` | PostgreSQL migrations applied by `scripts/migrate_postgres.py` |
@@ -66,6 +67,29 @@ Runs both migrations and baseline data deployment against local SQL Server:
 ```powershell
 npm run db:local
 ```
+
+### Application logs
+
+The Python API uses Loguru for terminal output and a single combined daily log file for
+all levels. On the Azure VM, production files are written to `/opt/logs/prod/` and
+development files to `/opt/logs/dev/`, with names such as `2026-10-30.log`. Each line
+uses a 24-hour timestamp. Files are rotated at midnight. At 00:05 on the first day of
+each month, the previous month's daily files are verified and bundled into
+`archive/YYYY-MM.zip` inside the matching environment folder; source daily files are
+removed only after the archive passes verification. The deployment scripts mount the
+VM's `/opt/logs` directory into the API container. Local `logs/` files are Git-ignored,
+excluded from Docker build contexts, and excluded explicitly from development and
+production `rsync` deployment. Deployment therefore updates the API code without
+copying local log files to the VM; runtime logs remain in the VM's mounted `/opt/logs`.
+Database logs are stored in `dbo.system_logs`; run the normal database migration before
+enabling the new log viewer features.
+For Supabase deployments, apply the corresponding `postgres/migrations/005_system_logs.sql`
+through the Postgres migration workflow before using persisted logs.
+
+Request and response payloads are captured only from a small allowlist of operational
+fields. Authentication, candidate, resume, interview, assessment, test, employee, AI,
+and upload routes do not store bodies. Credentials, bearer tokens, and secret-like
+values are redacted. SQL statements and bind parameters are never written to logs.
 
 ### 6. Azure SQL Deployment
 ```powershell

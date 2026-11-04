@@ -6,12 +6,16 @@ import math
 import re
 import threading
 import time
+import traceback
 from collections import OrderedDict
 from typing import Any, Optional
 
 import httpx
 
 from core.config import env
+from core.logger import logger
+from core.request_context import log_context
+from services.system_logs import record_log
 
 DEFAULT_BASE = "http://127.0.0.1:8080"
 DEFAULT_MODEL = "Qwen3.5-4B-Q4_K_M"
@@ -275,16 +279,68 @@ def complete(prompt: str, temperature: float = 0.2, max_tokens: int = 512, syste
     if cacheable:
         cached = _cache_get(key)
         if cached is not None:
+            elapsed_ms = 0.0
+            logger.bind(module="ai", action="llm_cache_hit", model=model_name()).info("AI response served from cache")
+            record_log({
+                "module": "ai",
+                "action": "llm_cache_hit",
+                "log_level": "INFO",
+                "status": "success",
+                "message": "AI response served from cache",
+                "execution_time": elapsed_ms,
+                "input_tokens": estimate_tokens(system) + estimate_tokens(prompt),
+                "output_tokens": estimate_tokens(cached),
+                "model": model_name(),
+                **log_context(),
+            })
             return cached
     wait_s = _int_env("LLM_LIVE_WAIT_S", 25) if priority == PRIORITY_LIVE else min(timeout_s, _int_env("LLM_BATCH_WAIT_S", 600))
-    gate.acquire(priority, wait_s)
     started = time.monotonic()
     ok = False
+    acquired = False
     try:
+        gate.acquire(priority, wait_s)
+        acquired = True
         text = _request(system, prompt, temperature, max_tokens, timeout_s)
         ok = True
+    except Exception as err:
+        elapsed_ms = round((time.monotonic() - started) * 1000, 2)
+        logger.bind(module="ai", action="llm_completion", model=model_name(), execution_time_ms=elapsed_ms).exception(
+            "AI completion failed"
+        )
+        record_log({
+            "module": "ai",
+            "action": "llm_completion",
+            "log_level": "ERROR",
+            "status": "failed",
+            "message": "AI completion failed",
+            "error_message": f"{type(err).__name__}: {err}",
+            "stack_trace": "".join(traceback.format_exception(type(err), err, err.__traceback__)),
+            "execution_time": elapsed_ms,
+            "input_tokens": estimate_tokens(system) + estimate_tokens(prompt),
+            "model": model_name(),
+            **log_context(),
+        })
+        raise
     finally:
-        gate.release(ok, time.monotonic() - started)
+        if acquired:
+            gate.release(ok, time.monotonic() - started)
+    elapsed_ms = round((time.monotonic() - started) * 1000, 2)
+    logger.bind(module="ai", action="llm_completion", model=model_name(), execution_time_ms=elapsed_ms).info(
+        "AI completion succeeded"
+    )
+    record_log({
+        "module": "ai",
+        "action": "llm_completion",
+        "log_level": "INFO",
+        "status": "success",
+        "message": "AI completion succeeded",
+        "execution_time": elapsed_ms,
+        "input_tokens": estimate_tokens(system) + estimate_tokens(prompt),
+        "output_tokens": estimate_tokens(text),
+        "model": model_name(),
+        **log_context(),
+    })
     if cacheable:
         _cache_put(key, text)
     return text

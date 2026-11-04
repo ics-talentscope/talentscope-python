@@ -34,6 +34,11 @@ def add_log(actor_email: str, action: str, target: str, details: str, ip_address
         get_store().insert("audit_logs", record)
     except Exception as err:
         log.warning("Failed to write audit log: %s", err)
+    from services.system_logs import record_business_event
+
+    failed = any(marker in action.upper() for marker in ("FAIL", "DENIED", "ERROR", "LOCKOUT"))
+    module = "security" if failed or "ACCESS" in action.upper() or "PERMISSION" in action.upper() else "auth"
+    record_business_event(module, action, "failed" if failed else "success", f"{target}: {details}", actor_email)
     return _map(record)
 
 

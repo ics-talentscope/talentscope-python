@@ -26,6 +26,8 @@ def load_schema() -> dict[str, set]:
             if mm:
                 cols.add(mm.group(1))
         tables[m.group(1)] = cols
+    for m in re.finditer(r"ALTER TABLE dbo\.(\w+)\s+ADD\s+(\w+)\s+", text, re.I):
+        tables.setdefault(m.group(1), set()).add(m.group(2))
     tables.setdefault("portal_settings", set()).add("key")
     return tables
 
@@ -75,6 +77,8 @@ def store(monkeypatch):
     resumes._cache.clear()
     for name in ("ADMIN_PASSWORD", "SCREENING_ADMIN_PASSWORD"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SAML_ENABLED", "0")
+    monkeypatch.setenv("SAML_ADMIN_SSO", "0")
     yield memory
     set_store(None)
 

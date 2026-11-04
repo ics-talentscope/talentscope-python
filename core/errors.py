@@ -1,5 +1,6 @@
 import logging
 import re
+import traceback
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -66,6 +67,8 @@ def install_error_handlers(app: FastAPI) -> None:
         return json_error(400, "Invalid request")
 
     @app.exception_handler(Exception)
-    async def _unhandled(_: Request, exc: Exception):
+    async def _unhandled(request: Request, exc: Exception):
+        request.state.error_message = f"{type(exc).__name__}: {exc}"[:1000]
+        request.state.stack_trace = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
         log.exception("unhandled error: %s", exc)
         return json_error(500, "Internal server error")

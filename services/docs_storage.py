@@ -11,9 +11,7 @@ CATEGORIES = ("BR", "JD", "Resumes", "Corp Pool", "Portal Mapping")
 def _dir(category: str) -> Path:
     if category not in CATEGORIES:
         raise ValueError(f"Unknown docs category: {category}")
-    path = UPLOAD_DIR / "docs" / category
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return UPLOAD_DIR / "docs" / category
 
 
 def usable(name: str) -> bool:
@@ -21,7 +19,10 @@ def usable(name: str) -> bool:
 
 
 def list_files(category: str) -> list[str]:
-    return sorted(p.name for p in _dir(category).iterdir() if p.is_file() and usable(p.name))
+    path = _dir(category)
+    if not path.is_dir():
+        return []
+    return sorted(p.name for p in path.iterdir() if p.is_file() and usable(p.name))
 
 
 def _path(category: str, name: str) -> Optional[Path]:
@@ -38,6 +39,7 @@ def write_file(category: str, name: str, data: bytes) -> str:
     path = _path(category, name)
     if not path:
         raise ValueError("Invalid file name")
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
     return path.name
 

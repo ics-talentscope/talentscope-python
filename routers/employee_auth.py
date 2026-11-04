@@ -12,7 +12,7 @@ from core.errors import json_error, public_error
 from core.security import get_client_ip, is_rate_limited, is_rate_limited_any, rate_limited_response
 from core.tokens import sign_token, verify_token
 from core.validation import as_email, as_employee_id, as_password, as_trimmed
-from services import accounts, admin_accounts, audit, saml
+from services import accounts, admin_accounts, audit, employee_otp, saml
 from services.products import format_product_display_name
 
 log = logging.getLogger("talentscope")
@@ -48,44 +48,56 @@ def login(request: Request, body: dict = Body(default_factory=dict)):
     if ip_limit.limited:
         return rate_limited_response(ip_limit, "Too many login attempts. Please try again later.")
     try:
-        employee_id = as_employee_id(body.get("employee_id"))
+        raw_login = body.get("employee_id")
+        employee_id = as_employee_id(raw_login)
+        login_email = as_email(raw_login) if isinstance(raw_login, str) else None
         raw_password = body.get("password")
         password = as_password(raw_password.strip() if isinstance(raw_password, str) else raw_password, allow_empty=True)
-        if not employee_id:
-            return json_error(400, "Employee ID is required")
+        if not employee_id and not login_email:
+            return json_error(400, "Enter a valid Employee ID or registered email address.")
         if password is None:
-            return json_error(400, "Invalid request")
-        account_limit = is_rate_limited_any([f"auth:acct:{employee_id.upper()}"], 8, 60_000)
+            return json_error(400, "Password must be provided as text and cannot exceed 256 characters.")
+        rate_key = (employee_id or login_email or "").upper()
+        account_limit = is_rate_limited_any([f"auth:acct:{rate_key}"], 8, 60_000)
         if account_limit.limited:
             return rate_limited_response(account_limit, "Too many login attempts. Please try again later.")
-        employee = accounts.get_account(employee_id)
+        employee = accounts.get_account(employee_id) if employee_id else None
+        if not employee and login_email:
+            employee = accounts.get_account_by_email(login_email)
+            if employee:
+                employee_id = employee["employee_id"]
         if not employee:
             # Same message as bad password to avoid account enumeration.
-            return json_error(401, "Invalid credentials")
+            return json_error(401, "Employee ID or password is incorrect. Check both fields and try again.")
         has_pw = accounts.has_password(employee)
         hash_valid = has_pw and accounts.verify_password(password, employee.get("password_salt") or "", employee.get("password_hash") or "")
         first_login = employee["is_first_login"] if employee.get("is_first_login") is not None else not has_pw
         actor = employee["email"] or employee["employee_id"]
-        # Never allow blank password or password == employee ID (even on first login).
-        if not password or password.upper() == employee["employee_id"].strip().upper():
-            audit.add_log(actor, "EMPLOYEE_LOGIN_FAILURE", "Employee Portal", "Blank or employee-ID password rejected", ip)
-            return json_error(401, "Invalid credentials")
-        if not hash_valid:
+        # Invites set temporary password = Employee ID. Allow that (and matching hash)
+        # on first login, then prompt to keep or change via first_time_modal.
+        is_emp_id_pw = bool(password) and password.upper() == employee["employee_id"].strip().upper()
+        if not password:
+            audit.add_log(actor, "EMPLOYEE_LOGIN_FAILURE", "Employee Portal", "Blank password rejected", ip)
+            return json_error(401, "Enter your employee ID and password.")
+        allowed_initial = first_login and is_emp_id_pw
+        if not hash_valid and not allowed_initial:
             if first_login and not has_pw:
-                audit.add_log(actor, "EMPLOYEE_LOGIN_FAILURE", "Employee Portal", "First login requires SSO or a set password", ip)
-                return json_error(401, "Sign in with Microsoft, or ask HR to set your initial password.")
+                audit.add_log(actor, "EMPLOYEE_LOGIN_FAILURE", "Employee Portal", "No initial employee password is configured", ip)
+                return json_error(401, "No password is configured for this account yet. Sign in with Microsoft or ask HR to set your initial password.")
             audit.add_log(actor, "EMPLOYEE_LOGIN_FAILURE", "Employee Portal", "Invalid password provided", ip)
-            return json_error(401, "Invalid credentials")
+            return json_error(401, "Employee ID or password is incorrect. Check both fields and try again.")
+        # Emp-ID temporary password always forces the keep/change modal.
+        force_password_prompt = first_login or (is_emp_id_pw and hash_valid)
         token = sign_token(employee["employee_id"])
         accounts.sync_account(employee)
-        if first_login:
+        if force_password_prompt:
             audit.add_log(actor, "EMPLOYEE_LOGIN_FIRST_TIME_SUCCESS", "Employee Portal",
-                          "First time login. Prompting to keep or change password.", ip)
+                          "First time / initial password login. Prompting to keep or change password.", ip)
             return {"status": "first_time_modal", "token": token, "employee": _employee_payload(employee)}
         audit.add_log(actor, "EMPLOYEE_LOGIN_SUCCESS", "Employee Portal", "Employee logged in and synced successfully", ip)
         return {"status": "ok", "token": token, "employee": _employee_payload(employee)}
     except Exception as err:
-        return public_error(err, "Unable to verify credentials")
+        return public_error(err, "Employee sign-in could not be completed. Retry; contact support if it continues.")
 
 
 @router.get("/validate")
@@ -160,10 +172,13 @@ def confirm_password(request: Request, body: dict = Body(default_factory=dict)):
             return {"status": "ok", "message": "Initial password retained.", "token": token, "employee": _employee_payload(employee)}
         if action == "change":
             new_password = as_password(body.get("password"))
+            otp = as_trimmed(body.get("otp"), 6)
             if not new_password:
                 return json_error(400, "Please enter a new password.")
             if not _strong(new_password):
                 return json_error(400, "Password must be at least 8 characters long, contain uppercase, lowercase, number, and special character.")
+            if not re.fullmatch(r"\d{6}", otp) or not employee_otp.verify_code(employee, "change", otp):
+                return json_error(400, "The verification code is invalid or expired.")
             if not accounts.save_password(employee["employee_id"], new_password):
                 return json_error(500, "Failed to update password.")
             return {"status": "ok", "message": "Password updated successfully.", "token": token, "employee": _employee_payload(employee)}
@@ -180,27 +195,77 @@ def reset_password(request: Request, body: dict = Body(default_factory=dict)):
         return rate_limited_response(ip_limit, "Too many attempts. Please try again later.")
     try:
         employee_id = as_employee_id(body.get("employee_id"))
-        email = as_email(body.get("email")) if isinstance(body.get("email"), str) and body["email"].strip() else ""
+        otp = as_trimmed(body.get("otp"), 6)
         password = as_password(body.get("password"))
         if not employee_id:
             return json_error(400, "Employee ID is required")
         if password is None:
             return json_error(400, "Invalid request")
+        if not re.fullmatch(r"\d{6}", otp):
+            return json_error(400, "Enter the 6-digit verification code.")
         account_limit = is_rate_limited_any([f"auth:acct:{employee_id.upper()}"], 5, 60_000)
         if account_limit.limited:
             return rate_limited_response(account_limit, "Too many attempts. Please try again later.")
         employee = accounts.get_account(employee_id)
         if not employee:
             return json_error(404, "Employee ID not found")
-        if employee["email"] and (not email or employee["email"].lower().strip() != email.lower().strip()):
-            return json_error(400, "Provided email does not match our records for this Employee ID")
         if not _strong(password):
             return json_error(400, "Password does not meet the strength requirements (Min 8 chars, 1 uppercase, 1 lowercase, 1 number, 1 special char)")
+        if password.upper() == employee["employee_id"].strip().upper():
+            return json_error(400, "Password cannot be the same as your Employee ID.")
+        if not employee_otp.verify_code(employee, "reset", otp):
+            return json_error(400, "The verification code is invalid or expired.")
         if not accounts.save_password(employee["employee_id"], password):
             return json_error(500, "Unable to reset password")
         return {"status": "ok", "message": "Password reset successful"}
     except Exception as err:
         return public_error(err, "Unable to reset password")
+
+
+@router.post("/request-password-reset-otp")
+def request_password_reset_otp(request: Request, body: dict = Body(default_factory=dict)):
+    ip = get_client_ip(request)
+    ip_limit = is_rate_limited_any([f"auth:ip:{ip}"], 8, 60_000)
+    if ip_limit.limited:
+        return rate_limited_response(ip_limit, "Too many attempts. Please try again later.")
+    try:
+        employee_id = as_employee_id(body.get("employee_id"))
+        email = as_email(body.get("email"))
+        if not employee_id or not email:
+            return json_error(400, "Employee ID and registered email are required.")
+        account_limit = is_rate_limited_any([f"auth:otp:{employee_id.upper()}"], 3, 10 * 60_000)
+        if account_limit.limited:
+            return rate_limited_response(account_limit, "Too many verification requests. Please try again later.")
+        employee = accounts.get_account(employee_id)
+        if not employee or employee.get("email", "").lower().strip() != email:
+            return json_error(400, "Employee ID or registered email could not be verified.")
+        if not employee_otp.send_code(employee, "reset"):
+            return json_error(503, "Unable to deliver the verification email. Please contact your administrator.")
+        audit.add_log(email, "EMPLOYEE_PASSWORD_RESET_OTP_SENT", "Employee Portal", "Password reset verification code sent", ip)
+        return {"status": "ok", "message": "A verification code has been sent to your registered email."}
+    except Exception as err:
+        return public_error(err, "Unable to send verification code")
+
+
+@router.post("/request-password-change-otp")
+def request_password_change_otp(request: Request, employee: dict = Depends(require_employee)):
+    ip = get_client_ip(request)
+    ip_limit = is_rate_limited_any([f"auth:ip:{ip}"], 8, 60_000)
+    if ip_limit.limited:
+        return rate_limited_response(ip_limit, "Too many attempts. Please try again later.")
+    account_limit = is_rate_limited_any([f"auth:otp:{employee['employee_id'].upper()}"], 3, 10 * 60_000)
+    if account_limit.limited:
+        return rate_limited_response(account_limit, "Too many verification requests. Please try again later.")
+    try:
+        if not employee_otp.send_code(employee, "change"):
+            return json_error(503, "Unable to deliver the verification email. Please contact your administrator.")
+        audit.add_log(employee.get("email") or employee["employee_id"], "EMPLOYEE_PASSWORD_CHANGE_OTP_SENT",
+                      "Employee Portal", "Password change verification code sent", ip)
+        return {"status": "ok", "message": "A verification code has been sent to your registered email."}
+    except ValueError as err:
+        return json_error(400, str(err))
+    except Exception as err:
+        return public_error(err, "Unable to send verification code")
 
 
 @router.post("/profile")
@@ -258,20 +323,22 @@ def change_password(request: Request, body: dict = Body(default_factory=dict)):
     if account_limit.limited:
         return rate_limited_response(account_limit, "Too many attempts. Please try again later.")
     try:
-        current = as_password(body.get("currentPassword").strip() if isinstance(body.get("currentPassword"), str) else body.get("currentPassword"), True)
         new_password = as_password(body.get("newPassword"))
-        if not current or not new_password:
-            return json_error(400, "Current and new password are required.")
+        otp = as_trimmed(body.get("otp"), 6)
+        if not new_password or not re.fullmatch(r"\d{6}", otp):
+            return json_error(400, "A new password and 6-digit verification code are required.")
         actor = employee["email"] or employee["employee_id"]
-        current_ok = accounts.has_password(employee) and accounts.verify_password(
-            current, employee.get("password_salt") or "", employee.get("password_hash") or "")
-        if not current_ok:
-            audit.add_log(actor, "EMPLOYEE_PASSWORD_CHANGE_FAILURE", "Employee Portal", "Current password incorrect", ip)
-            return json_error(400, "Current password is incorrect.")
         if not _strong(new_password):
             return json_error(400, "Password must be at least 8 characters long, contain uppercase, lowercase, number, and special character.")
-        if new_password == current:
+        if new_password.upper() == employee["employee_id"].strip().upper():
+            return json_error(400, "Password cannot be the same as your Employee ID.")
+        if accounts.has_password(employee) and accounts.verify_password(
+            new_password, employee.get("password_salt") or "", employee.get("password_hash") or ""
+        ):
             return json_error(400, "New password must be different from the current one.")
+        if not employee_otp.verify_code(employee, "change", otp):
+            audit.add_log(actor, "EMPLOYEE_PASSWORD_CHANGE_FAILURE", "Employee Portal", "Invalid or expired OTP", ip)
+            return json_error(400, "The verification code is invalid or expired.")
         if not accounts.save_password(employee["employee_id"], new_password):
             return json_error(500, "Failed to update password.")
         audit.add_log(actor, "EMPLOYEE_PASSWORD_CHANGE_SUCCESS", "Employee Portal", "Employee changed their password", ip)

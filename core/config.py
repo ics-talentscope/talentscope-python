@@ -15,9 +15,9 @@ for _candidate in _env_candidates:
         load_dotenv(_candidate, override=False)
         break
 
-_default_uploads = ROOT / "python" / "uploads"
+_default_uploads = ROOT / "python" / "recordings"
 if not _default_uploads.parent.is_dir():
-    _default_uploads = Path(__file__).resolve().parents[1] / "uploads"
+    _default_uploads = Path(__file__).resolve().parents[1] / "recordings"
 UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR") or str(_default_uploads)).resolve()
 
 

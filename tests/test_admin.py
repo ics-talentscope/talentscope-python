@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -9,6 +10,7 @@ RID = "11111111-1111-4111-8111-111111111111"
 
 @pytest.fixture()
 def admin(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAIL", "boss@infinite.com")
     monkeypatch.setenv("ADMIN_PASSWORD", "AdminPw1!")
     token = client.post("/api/admin/auth/login", json={"email": "boss@infinite.com", "password": "AdminPw1!"}).json()["token"]
     return {"Authorization": f"Bearer {token}"}
@@ -72,7 +74,11 @@ def test_reset_clears_candidate_state(client, store, admin):
     assert store.count("interview_attempts") == 0
     assert store.first("candidate_sessions", {"email": "c@x.com"})["used"] is False
     assert store.count("reset_logs") == 1
+    invalid_email = client.post("/api/admin/resumes/reset_by_email", headers=admin, json={"email": "invalid"})
+    assert invalid_email.status_code == 400 and "valid candidate email" in invalid_email.json()["error"]
     assert client.post("/api/admin/resumes/reset_by_email", headers=admin, json={"email": "ghost@x.com"}).status_code == 404
+    missing = client.post("/api/admin/resumes/reset_by_email", headers=admin, json={"email": "ghost@x.com"})
+    assert missing.json()["error"] == "Candidate not found. Check the email address and try again."
     assert client.post("/api/admin/resumes/reset_by_email", headers=admin, json={"email": "c@x.com"}).status_code == 200
 
 
@@ -85,6 +91,12 @@ def test_invite_records_email_and_uses_app_url(client, store, admin, monkeypatch
     assert res["success"] and res["status"] == "simulated" and res["fullName"] == "Cand Idate"
     mail = store.select("simulated_emails")[0]
     assert "http://localhost:3000" in mail["body"] and "vercel.app" not in mail["body"] and "Technical & Behavioral" in mail["subject"]
+    assert ">Start Assessment</a>" in mail["body"] and "Temporary password:" in mail["body"]
+    password = re.search(r"Temporary password: <strong>([^<]+)</strong>", mail["body"]).group(1)
+    assert len(password) >= 12
+    assert store.first("candidate_sessions", {"email": "c@x.com"})["password_hash"] != password
+    login = client.post("/api/interview/access", json={"email": "c@x.com", "password": password})
+    assert login.status_code == 200 and login.json()["resumeId"] == RID
     assert store.first("candidate_sessions", {"email": "c@x.com"})["used"] is False
     emails = client.get("/api/admin/emails", headers=admin).json()["emails"]
     assert emails[0]["to"] == "c@x.com"
@@ -117,7 +129,10 @@ def test_portal_settings_sync_and_logs(client, store, admin, monkeypatch, tmp_pa
     assert logs[0]["action"] == "UPDATE_PORTAL_SETTINGS"
     assert client.get("/api/admin/logs?module=employee&download=true", headers=admin).status_code == 200
     assert client.delete("/api/admin/logs", headers=admin).json() == {"success": True}
-    assert client.get("/api/admin/logs", headers=admin).json()["logs"] == []
+    cleared_logs = client.get("/api/admin/logs", headers=admin).json()["logs"]
+    actions = {entry["action"] for entry in cleared_logs}
+    assert "UPDATE_PORTAL_SETTINGS" not in actions
+    assert "CLEAR_SYSTEM_LOGS" in actions
 
 
 def test_admin_employee_test_attempts_and_video(client, store, admin, monkeypatch, tmp_path):
@@ -128,8 +143,8 @@ def test_admin_employee_test_attempts_and_video(client, store, admin, monkeypatc
                                   {"id": q0, "test_id": tid, "question_index": 0, "question_text": "A?", "options": ["x", "y"]}])
     store.seed("test_attempts", [{"id": "a", "test_id": tid, "question_id": q0, "selected_option_index": 1, "is_correct": True}])
     res = client.get(f"/api/admin/employee-tests/{tid}/attempts", headers=admin).json()
-    assert [q["question_text"] for q in res["questions"]] == ["A?", "B?"]
-    assert res["questions"][0]["selected_option_text"] == "B) y" and res["questions"][1]["selected_option_text"] is None
+    assert [q["question_text"] for q in res["questions"]] == ["A?"]
+    assert res["questions"][0]["selected_option_text"] == "B) y"
     assert client.get("/api/admin/employee-tests/cccccccc-cccc-4ccc-8ccc-cccccccccc99/attempts", headers=admin).status_code == 404
     assert client.get(f"/api/admin/employee-tests/{tid}/video", headers=admin).status_code == 404
     from services import test_video

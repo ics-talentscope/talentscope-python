@@ -1,4 +1,7 @@
 import logging
+import csv
+import io
+import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Body, Depends, Request
@@ -8,7 +11,7 @@ from core.auth import acting_admin_email, require_admin, require_permission
 from core.db import get_store
 from core.errors import json_error, public_error
 from core.security import get_client_ip
-from services import admin_accounts, audit, reset_logs, settings, structured_log
+from services import admin_accounts, audit, reset_logs, settings, structured_log, system_logs
 from services.dashboard_sync import bump_sync, read_sync
 from services.structured_log import write_log
 
@@ -71,12 +74,15 @@ def sync():
 
 def _display_log(entry: dict) -> dict:
     status = str(entry.get("status") or "success").lower()
+    raw_status = status
+    if status.isdigit():
+        status = "failed" if int(status) >= 400 else "success"
     if status not in ("success", "failed", "error", "warning"):
         status = "success"
     timestamp = str(entry.get("timestamp") or "")
     if timestamp in ("", "None"):
         timestamp = datetime.now(timezone.utc).isoformat()
-    return {
+    display = {
         "timestamp": timestamp,
         "module": str(entry.get("module") or "audit"),
         "action": str(entry.get("action") or "UNKNOWN"),
@@ -85,26 +91,115 @@ def _display_log(entry: dict) -> dict:
         "actor": str(entry.get("actor") or ""),
         "ip": str(entry.get("ip") or ""),
     }
+    for key in (
+        "request_id", "user_role", "user_agent", "endpoint", "execution_time",
+        "db_operation", "table_name", "record_id", "model", "input_tokens", "output_tokens",
+        "level", "error_message", "stack_trace", "request_payload", "response_payload",
+    ):
+        value = entry.get(key)
+        if value is not None:
+            display[key] = value
+    if raw_status.isdigit():
+        display["status_code"] = int(raw_status)
+    return display
+
+
+@router.get("/logs/metrics", dependencies=[Depends(require_permission("systemLogs"))])
+def get_log_metrics(request: Request):
+    try:
+        return system_logs.metrics(
+            request.query_params.get("from") or "",
+            request.query_params.get("to") or "",
+        )
+    except Exception as err:
+        return public_error(err, "Could not load log metrics")
 
 
 @router.get("/logs", dependencies=[Depends(require_permission("systemLogs"))])
 def get_logs(request: Request):
     module = request.query_params.get("module") or "all"
     status = request.query_params.get("status") or "all"
+    level = (request.query_params.get("level") or "").upper()
+    user = request.query_params.get("user") or ""
+    from_date = request.query_params.get("from") or ""
+    to_date = request.query_params.get("to") or ""
+    endpoint = request.query_params.get("endpoint") or ""
+    request_id = request.query_params.get("request_id") or ""
     search = (request.query_params.get("search") or "").lower()
-    if request.query_params.get("download") == "true":
-        if module != "all" and not structured_log.MODULE_RE.match(module):
-            return json_error(404, "Log file not found")
-        entries = [_display_log(entry) for entry in structured_log.merged_logs(module)]
-        content = "\n".join(__import__("json").dumps(entry) for entry in entries)
-        name = "system_logs.log" if module == "all" else f"{module}.log"
-        return Response(content, media_type="text/plain", headers={"Content-Disposition": f'attachment; filename="{name}"'})
-    entries = [_display_log(entry) for entry in structured_log.merged_logs(module)]
+    try:
+        entries = [_display_log(entry) for entry in structured_log.merged_logs(module, {
+            "user": user,
+            "level": level,
+            "from_date": from_date,
+            "to_date": to_date,
+            "search": search,
+        })]
+    except Exception as err:
+        return public_error(err, "Could not read system logs")
     if status != "all":
         entries = [e for e in entries if e["status"] == status.lower()]
+    if level:
+        entries = [e for e in entries if str(e.get("level") or "").upper() == level]
+    if user:
+        entries = [e for e in entries if user.casefold() in str(e.get("actor") or "").casefold()]
+    if from_date:
+        entries = [e for e in entries if str(e.get("timestamp") or "") >= from_date]
+    if to_date:
+        entries = [e for e in entries if str(e.get("timestamp") or "")[:10] <= to_date[:10]]
+    if endpoint:
+        entries = [e for e in entries if endpoint.casefold() in str(e.get("endpoint") or "").casefold()]
+    if request_id:
+        entries = [e for e in entries if request_id.casefold() in str(e.get("request_id") or "").casefold()]
     if search:
-        fields = ("action", "details", "module", "actor", "ip")
+        fields = ("action", "details", "module", "actor", "ip", "request_id", "endpoint", "error_message")
         entries = [e for e in entries if any(search in str(e.get(f) or "").lower() for f in fields)]
+
+    export_format = (request.query_params.get("format") or "").lower()
+    if export_format in ("json", "csv", "xlsx") or request.query_params.get("download") == "true":
+        if module != "all" and not structured_log.MODULE_RE.match(module):
+            return json_error(404, "Log file not found")
+        if export_format == "csv":
+            output = io.StringIO()
+            fields = [
+                "timestamp", "level", "module", "action", "status", "status_code", "actor",
+                "user_role", "ip", "request_id", "endpoint", "execution_time", "details",
+                "db_operation", "table_name", "record_id", "model", "input_tokens", "output_tokens",
+                "error_message", "stack_trace", "request_payload", "response_payload",
+            ]
+            writer = csv.DictWriter(output, fieldnames=fields, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(entries)
+            content, media_type, extension = output.getvalue(), "text/csv", "csv"
+        elif export_format == "json":
+            content, media_type, extension = json.dumps(entries, ensure_ascii=False), "application/json", "json"
+        elif export_format == "xlsx":
+            from openpyxl import Workbook
+
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "System Logs"
+            columns = [
+                "timestamp", "level", "module", "action", "status", "status_code", "actor",
+                "user_role", "ip", "request_id", "endpoint", "execution_time", "details",
+                "db_operation", "table_name", "record_id", "model", "input_tokens", "output_tokens",
+                "error_message", "stack_trace", "request_payload", "response_payload",
+            ]
+            sheet.append(columns)
+            for entry in entries:
+                sheet.append([
+                    json.dumps(entry.get(column), ensure_ascii=False)
+                    if isinstance(entry.get(column), (dict, list))
+                    else entry.get(column)
+                    for column in columns
+                ])
+            output = io.BytesIO()
+            workbook.save(output)
+            content, media_type, extension = output.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"
+        else:
+            content = "\n".join(json.dumps(entry, ensure_ascii=False) for entry in entries)
+            media_type, extension = "text/plain", "log"
+        name = f"system_logs.{extension}" if module == "all" else f"{module}.{extension}"
+        return Response(content, media_type=media_type, headers={"Content-Disposition": f'attachment; filename="{name}"'})
     return {"logs": entries[:1500], "total": len(entries)}
 
 
@@ -115,6 +210,10 @@ def clear_logs(request: Request):
         return json_error(403, "Only Portal Config admins can clear system logs.")
     structured_log.clear_all()
     audit.clear_logs()
+    try:
+        get_store().delete("system_logs", None)
+    except Exception as err:
+        return public_error(err, "Could not clear persisted system logs")
     write_log("audit", "CLEAR_SYSTEM_LOGS", "success", f"Cleared system and audit logs by {actor}")
     audit.add_log(actor, "CLEAR_SYSTEM_LOGS", "System Logs", "Cleared system and audit logs", get_client_ip(request))
     return {"success": True}
