@@ -1,4 +1,5 @@
 import logging
+import json
 import os
 import re
 import shutil
@@ -112,7 +113,7 @@ def _patch_record(record: dict) -> None:
     from core import request_context
 
     for field in ("module", "action", "status"):
-        record["extra"].setdefault(field, "-")
+        record["extra"].setdefault(field, "")
     for key, value in request_context.log_context().items():
         record["extra"].setdefault(key, value)
     record["message"] = _SECRET_ASSIGNMENT_RE.sub(r"\1\2[REDACTED]", record["message"])
@@ -138,6 +139,22 @@ def _patch_record(record: dict) -> None:
                 except Exception:
                     safe_exception = RuntimeError(safe_message)
                 record["exception"] = (exception.type, safe_exception, exception.traceback)
+    record["extra"]["context"] = {
+        key: value
+        for key, value in record["extra"].items()
+        if key not in {"module", "action", "status", "context"} and value not in (None, "", "-")
+    }
+    columns = [record["time"].strftime("%Y-%m-%d %H:%M:%S.%f")[:-3], record["level"].name]
+    columns.extend(
+        str(record["extra"][field])
+        for field in ("module", "action", "status")
+        if record["extra"].get(field) not in (None, "", "-")
+    )
+    record["extra"]["line_prefix"] = " | ".join(columns)
+    context = record["extra"]["context"]
+    record["extra"]["line_context"] = (
+        f" | {json.dumps(context, ensure_ascii=False, default=str)}" if context else ""
+    )
 
 
 def configure_logging(directory: Path, level: str = "INFO", environment: str | None = None) -> None:
@@ -164,11 +181,7 @@ def configure_logging(directory: Path, level: str = "INFO", environment: str | N
         rotation="00:00",
         retention="365 days",
         encoding="utf-8",
-        format=(
-            "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level: <8} | "
-            "{extra[module]: <18} | {extra[action]: <28} | "
-            "{extra[status]: <8} | {message} | {extra}{exception}\n"
-        ),
+        format="{extra[line_prefix]} | {message}{extra[line_context]}{exception}",
         backtrace=False,
         diagnose=False,
         enqueue=True,
