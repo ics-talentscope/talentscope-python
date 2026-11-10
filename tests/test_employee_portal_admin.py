@@ -4,7 +4,8 @@ import re
 
 from openpyxl import Workbook
 
-from services import accounts, admin_accounts, corp_pool
+from core.tokens import sign_token
+from services import accounts, admin_accounts, corp_pool, question_bank
 
 
 def _admin(client, monkeypatch):
@@ -25,6 +26,72 @@ def _bank_csv(prefix="Q"):
     return output.getvalue().encode()
 
 
+def test_ai_question_generator_uses_model_output_and_falls_back_with_warning(monkeypatch, caplog):
+    model_questions = [{
+        "question": f"Model question {index}",
+        "options": ["Choice A", "Choice B", "Choice C", "Choice D"],
+        "correctIndex": 2,
+        "explanation": "Choice C is correct.",
+        "difficulty": "high",
+    } for index in range(10)]
+    monkeypatch.setattr(question_bank.llm, "complete_json", lambda *_args, **_kwargs: model_questions)
+    generated = question_bank.generate_ai_questions("AI", "Neural networks", "high")
+    assert generated[0]["question"] == "Model question 0"
+    assert generated[0]["correctIndex"] == 2
+    assert generated[0]["difficulty"] == "advanced"
+
+    def unavailable(*_args, **_kwargs):
+        raise question_bank.llm.LlmError("LLM unavailable")
+
+    fallback = [{"question": "Fallback", "options": ["A", "B", "C", "D"], "correctIndex": 0}]
+    monkeypatch.setattr(question_bank.llm, "complete_json", unavailable)
+    monkeypatch.setattr(question_bank, "fetch_questions", lambda *_args, **_kwargs: fallback)
+    assert question_bank.generate_ai_questions("AI", "Neural networks", "basic") == fallback
+    assert "using the built-in topic question fallback" in caplog.text
+
+
+def test_ai_questionnaire_defaults_without_product_and_supports_selection(client, store, monkeypatch):
+    admin = _admin(client, monkeypatch)
+    default_user = client.post("/api/admin/employee-portal/users", headers=admin, json={
+        "employeeId": "AI_DEFAULT", "name": "AI Default Employee", "email": "ai-default@example.com",
+        "designation": "Analyst", "product": "Ignored product without a question source",
+    })
+    assert default_user.status_code == 200, default_user.text
+    assert default_user.json()["questionSource"] == "ai"
+    employee = store.first("employees", {"employee_id": "AI_DEFAULT"})
+    assert employee["product"] == "AI Questionnaire"
+    assert employee["assessment_only"] is False
+
+    explicit_ai = client.post("/api/admin/employee-portal/users", headers=admin, json={
+        "employeeId": "AI_HIGH", "name": "AI High Employee", "email": "ai-high@example.com",
+        "designation": "Engineer", "questionType": "AI Questionnaire", "aiDifficulty": "high",
+    })
+    assert explicit_ai.status_code == 200, explicit_ai.text
+    assert explicit_ai.json()["questionSource"] == "ai"
+    assert store.first("employees", {"employee_id": "AI_HIGH"})["product"] == "AI Questionnaire"
+
+    generated = [{
+        "question": f"Generated question {index}",
+        "options": ["Wrong A", "Correct", "Wrong C", "Wrong D"],
+        "correctIndex": 1,
+        "explanation": "The selected option is correct.",
+        "difficulty": "beginner",
+    } for index in range(10)]
+    monkeypatch.setattr("routers.employee_portal.question_bank.generate_ai_questions", lambda *_args, **_kwargs: generated)
+    auth = {"Authorization": "Bearer " + sign_token("AI_DEFAULT")}
+    catalog = client.get("/api/employee/catalog", headers=auth).json()
+    assert "resource-product-assessment" not in {subject["id"] for subject in catalog}
+    ai_topics = next(subject for subject in catalog if subject["id"] == "ai")
+    levels = {topic["difficulty"] for module in ai_topics["modules"] for topic in module["topics"]}
+    assert {"beginner", "intermediate", "advanced"} <= levels
+
+    quiz = client.post("/api/employee/learning/ai-fundamentals/ai-quiz", headers=auth, json={})
+    assert quiz.status_code == 200, quiz.text
+    assigned = store.select("test_questions", {"test_id": quiz.json()["test_id"]})
+    assert len(assigned) == 10
+    assert assigned[0]["correct_option_index"] == 1
+
+
 def test_create_employee_and_assign_random_product_questions(client, store, monkeypatch):
     admin = _admin(client, monkeypatch)
     bank = client.post(
@@ -36,7 +103,7 @@ def test_create_employee_and_assign_random_product_questions(client, store, monk
     assert bank.status_code == 200, bank.text
     created = client.post("/api/admin/employee-portal/users", headers=admin, json={
         "employeeId": "EMP42", "name": "Employee One", "email": "employee@example.com",
-        "designation": "Engineer", "product": " product a ",
+        "designation": "Engineer", "product": " product a ", "questionType": "bank",
     })
     assert created.status_code == 200
     assert created.json()["firstLoginPassword"] == "EMP42"
@@ -56,7 +123,7 @@ def test_create_employee_and_assign_random_product_questions(client, store, monk
     original_hash = employee["password_hash"]
     repeated = client.post("/api/admin/employee-portal/users", headers=admin, json={
         "employeeId": "EMP42", "name": "Employee One Updated", "email": "employee@example.com",
-        "designation": "Engineer", "product": "Product A",
+        "designation": "Engineer", "product": "Product A", "questionType": "bank",
     })
     assert repeated.status_code == 200 and repeated.json()["created"] is False
     assert store.first("employees", {"employee_id": "EMP42"})["password_hash"] == original_hash
@@ -71,7 +138,7 @@ def test_create_employee_and_assign_random_product_questions(client, store, monk
     assert renewed_bank.status_code == 200
     reimported = client.post("/api/admin/employee-portal/users", headers=admin, json={
         "employeeId": "EMP42", "name": "Employee One Updated", "email": "employee@example.com",
-        "designation": "Engineer", "product": "Product A",
+        "designation": "Engineer", "product": "Product A", "questionType": "bank",
     })
     assert reimported.status_code == 200
     assert {row["question_text"] for row in store.select("test_questions", {"test_id": test["id"]})} <= {
@@ -87,6 +154,7 @@ def test_create_employee_and_assign_random_product_questions(client, store, monk
     assert second_bank.status_code == 200
     second = client.post("/api/admin/employee-portal/users", headers=admin, json={
         "employeeId": "EMP43", "name": "Employee Two", "email": "two@example.com", "product": "Product B",
+        "questionType": "bank",
     })
     assert second.status_code == 200
     second_test = store.first("tests", {"employee_id": store.first("employees", {"employee_id": "EMP43"})["id"]})
@@ -112,6 +180,7 @@ def test_bulk_upload_reports_row_errors(client, store, monkeypatch):
     result = client.post(
         "/api/admin/employee-portal/users/bulk",
         headers=admin,
+        data={"question_type": "bank"},
         files={"file": ("roster.xlsx", content.getvalue(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
     )
     assert result.status_code == 200
@@ -120,6 +189,25 @@ def test_bulk_upload_reports_row_errors(client, store, monkeypatch):
     employee = store.first("employees", {"employee_id": "EMP50"})
     assert employee["designation"] == "Analyst" and employee["product"] == "Product A"
     assert store.count("tests", {"employee_id": employee["id"]}) == 1
+
+    ai_workbook = Workbook()
+    ai_sheet = ai_workbook.active
+    ai_sheet.append(["Emp ID", "Name", "Email", "Role"])
+    ai_sheet.append(["EMP52", "AI Bulk Employee", "ai-bulk@example.com", "Analyst"])
+    ai_content = io.BytesIO()
+    ai_workbook.save(ai_content)
+    ai_result = client.post(
+        "/api/admin/employee-portal/users/bulk",
+        headers=admin,
+        data={"question_type": "ai"},
+        files={"file": ("ai-roster.xlsx", ai_content.getvalue(),
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+    )
+    assert ai_result.status_code == 200
+    assert ai_result.json()["created"] == 1 and ai_result.json()["failed"] == 0
+    ai_employee = store.first("employees", {"employee_id": "EMP52"})
+    assert ai_employee["product"] == "AI Questionnaire"
+    assert store.count("tests", {"employee_id": ai_employee["id"]}) == 0
 
 
 def test_employee_portal_edit_and_password_reset_notify_user(client, store, monkeypatch):
@@ -133,6 +221,7 @@ def test_employee_portal_edit_and_password_reset_notify_user(client, store, monk
     assert bank.status_code == 200
     created = client.post("/api/admin/employee-portal/users", headers=admin, json={
         "employeeId": "EMP60", "name": "Original Name", "email": "original@example.com", "product": "Product A",
+        "questionType": "bank",
     })
     assert created.status_code == 200
     original = store.first("employees", {"employee_id": "EMP60"})
@@ -200,6 +289,7 @@ def test_employee_portal_password_reset_surfaces_email_delivery_failure(client, 
     )
     created = client.post("/api/admin/employee-portal/users", headers=admin, json={
         "employeeId": "EMP61", "name": "Employee", "email": "employee@example.com", "product": "Product A",
+        "questionType": "bank",
     })
     assert created.status_code == 200
     monkeypatch.setattr("services.mailer.dispatch", lambda *_: ("simulated", None))
@@ -222,7 +312,7 @@ def test_employee_portal_profile_edit_preserves_assessment_score(client, store, 
     assert bank.status_code == 200
     created = client.post("/api/admin/employee-portal/users", headers=admin, json={
         "employeeId": "EMP63", "name": "Portal User", "email": "portal@example.com",
-        "designation": "Engineer", "product": "Product A",
+        "designation": "Engineer", "product": "Product A", "questionType": "bank",
     })
     assert created.status_code == 200
     test_id = created.json()["testId"]
@@ -256,6 +346,7 @@ def test_employee_portal_table_actions_update_and_reset_managed_accounts(client,
     assert bank.status_code == 200
     created = client.post("/api/admin/employee-portal/users", headers=admin, json={
         "employeeId": "EMP62", "name": "Portal User", "email": "portal@example.com", "product": "Product A",
+        "questionType": "bank",
     })
     assert created.status_code == 200
 

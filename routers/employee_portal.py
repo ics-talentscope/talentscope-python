@@ -39,7 +39,7 @@ def catalog(request: Request):
 def subjects(employee: dict = Depends(require_employee)):
     try:
         topics = portal.learning_topics_for_employee(employee)
-        if accounts.is_product_qb_employee(employee):
+        if accounts.is_product_qb_employee(employee) and not accounts.is_ai_questionnaire_employee(employee):
             emp_uuid = accounts.employee_uuid(employee["employee_id"])
             test = get_store().first("tests", {"employee_id": emp_uuid, "topic_id": accounts.PRODUCT_ASSESSMENT_TOPIC_ID}, ["id"]) if emp_uuid else None
             if test:
@@ -54,7 +54,7 @@ def subjects(employee: dict = Depends(require_employee)):
 @router.get("/assigned-test")
 def assigned_test(employee: dict = Depends(require_employee)):
     try:
-        if not accounts.is_product_qb_employee(employee):
+        if not accounts.is_product_qb_employee(employee) or accounts.is_ai_questionnaire_employee(employee):
             return {"active_test": None, "completed_test": None}
         emp_uuid = accounts.employee_uuid(employee["employee_id"])
         if not emp_uuid:
@@ -312,12 +312,16 @@ def ai_quiz(topic_id: str, body: dict = Body(default_factory=dict), employee: di
         store = get_store()
         existing = store.first("tests", {"employee_id": emp_uuid, "topic_id": topic_id}, ["id", "status", "total_questions", "started_at"])
         started_at, resume = _now(), False
-        generated = question_bank.fetch_questions(info["subject_title"], info["topic_title"], info["difficulty"])
-        if existing and existing["status"] in ("in_progress", "pending") and existing.get("total_questions") == 10:
+        existing_questions = store.count("test_questions", {"test_id": existing["id"]}) if existing else 0
+        if (existing and existing["status"] in ("in_progress", "pending")
+                and existing.get("total_questions") == 10 and existing_questions == 10):
             test_id, resume = existing["id"], True
             started_at = existing.get("started_at") or started_at
             store.update("tests", {"difficulty": info["difficulty"], "started_at": started_at}, {"id": test_id})
         else:
+            generated = question_bank.generate_ai_questions(
+                info["subject_title"], info["topic_title"], info["difficulty"]
+            )
             if existing:
                 test_id = existing["id"]
                 store.update("tests", {"status": "pending", "in_progress": None, "current_question_index": 0, "started_at": started_at,

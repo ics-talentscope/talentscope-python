@@ -36,12 +36,48 @@ def _employee_rows() -> list[dict]:
 def _record_result(row: dict, actor: str, request: Request) -> dict:
     try:
         result = portal_admin.provision_employee(row)
+        assignment = (
+            "AI questionnaire enabled; the employee can choose a topic and difficulty."
+            if result["questionSource"] == "ai"
+            else f"assigned {result['questionCount']} questions for {result['product']}."
+        )
         audit.add_log(actor, "EMPLOYEE_PORTAL_USER_PROVISIONED", "Employee Portal",
-                      f"{'Created' if result['created'] else 'Updated'} {result['employeeId']} and assigned "
-                      f"{result['questionCount']} questions for {result['product']}.", get_client_ip(request))
+                      f"{'Created' if result['created'] else 'Updated'} {result['employeeId']}; {assignment}",
+                      get_client_ip(request))
         return {"success": True, **result}
     except (ValueError, RuntimeError) as err:
         return {"success": False, "employeeId": str(row.get("employee_id") or ""), "error": str(err)}
+
+
+def _question_request_payload(body: dict) -> dict:
+    raw_product = str(body.get("product") or "").strip()
+    raw_question_type = next((
+        body.get(field) for field in (
+            "questionType", "question_type", "questionSource", "question_source",
+            "assessmentMode", "mode", "aiQuestionnaire", "ai_questionnaire",
+        )
+        if body.get(field) is not None and body.get(field) != ""
+    ), None)
+    if isinstance(raw_question_type, bool):
+        question_type = "ai" if raw_question_type else "bank"
+    else:
+        question_type = str(raw_question_type or "").strip().casefold()
+    if not question_type:
+        question_type = "ai"
+    if question_type in {"bank", "product-bank", "product_question_bank", "product question bank"}:
+        question_type = "bank"
+    elif question_type in {
+        "ai", "ai-questionnaire", "ai-questionaire", "ai questionnaire", "ai questionaire",
+        "questionnaire", "questionaire", "generated",
+    }:
+        question_type = "ai"
+    else:
+        raise ValueError("Question source must be AI Questionnaire or Product Question Bank.")
+    product = raw_product if question_type == "bank" else ""
+    return {
+        "questionType": question_type,
+        "product": product,
+    }
 
 
 @router.get("")
@@ -55,11 +91,16 @@ def overview():
 @router.post("/users")
 def create_user(request: Request, body: dict = Body(default_factory=dict)):
     actor = acting_admin_email(request) or "unknown"
+    try:
+        payload = _question_request_payload(body)
+    except ValueError as err:
+        return json_error(400, str(err))
     result = _record_result({
         "employee_id": body.get("employeeId") or body.get("employee_id"),
         "full_name": body.get("name") or body.get("full_name"),
         "email": body.get("email"), "designation": body.get("designation") or body.get("role"),
-        "product": body.get("product"),
+        "product": payload["product"],
+        "questionType": payload["questionType"],
     }, actor, request)
     if not result["success"]:
         return json_error(400, result["error"])
@@ -72,13 +113,25 @@ def update_user(employee_id: str, request: Request, body: dict = Body(default_fa
     account = accounts.get_account(employee_id)
     if not account or account.get("role") != "employee" or not account.get("product_qb_eligible"):
         return json_error(404, "Employee portal user not found")
+    try:
+        update_body = {**body, "product": body.get("product", account.get("product") or "")}
+        source_fields = (
+            "questionType", "question_type", "questionSource", "question_source",
+            "assessmentMode", "mode", "aiQuestionnaire", "ai_questionnaire",
+        )
+        if not any(body.get(field) for field in source_fields):
+            update_body["questionType"] = "ai" if accounts.is_ai_questionnaire_employee(account) else "bank"
+        payload = _question_request_payload(update_body)
+    except ValueError as err:
+        return json_error(400, str(err))
     result = _record_result({
         "employee_id": employee_id,
         "full_name": body.get("name", body.get("full_name", account.get("full_name"))),
         "email": body.get("email", account.get("email")),
         "designation": body.get("designation", account.get("designation")),
         "department": body.get("department", account.get("department")),
-        "product": body.get("product", account.get("product")),
+        "product": payload["product"],
+        "questionType": payload["questionType"],
     }, actor, request)
     if not result["success"]:
         return json_error(400, result["error"])
@@ -132,13 +185,13 @@ def reset_user_password(employee_id: str, request: Request):
 
 
 @router.post("/users/bulk")
-async def bulk_users(request: Request, file: UploadFile = File(...)):
+async def bulk_users(request: Request, file: UploadFile = File(...), question_type: str | None = Form(default=None)):
     actor = acting_admin_email(request) or "unknown"
     try:
         content = await file.read(UPLOAD_MAX_BYTES + 1)
         if len(content) > UPLOAD_MAX_BYTES:
             return json_error(413, "Roster file must be 10 MB or smaller.")
-        rows = portal_admin.parse_employee_upload(content, file.filename or "")
+        rows = portal_admin.parse_employee_upload(content, file.filename or "", question_type)
         seen: set[str] = set()
         results = []
         for row in rows:

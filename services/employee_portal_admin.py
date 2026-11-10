@@ -272,6 +272,38 @@ def _assignment_uses_bank(test_id: str, bank_questions: list[dict]) -> bool:
     )
 
 
+def _question_source(details: dict) -> str:
+    raw = details.get("questionType")
+    if raw is None:
+        raw = details.get("questionSource")
+    if raw is None:
+        raw = details.get("question_type")
+    if raw is None:
+        raw = details.get("question_source")
+    if raw is None:
+        raw = details.get("assessmentMode")
+    if raw is None:
+        raw = details.get("mode")
+    if raw is None:
+        raw = details.get("aiQuestionnaire")
+    if raw is None:
+        raw = details.get("ai_questionnaire")
+    if isinstance(raw, str):
+        value = raw.strip().casefold()
+    elif isinstance(raw, bool):
+        value = "ai" if raw else "bank"
+    else:
+        value = ""
+    if value in ("bank", "product-bank", "product_question_bank", "product question bank"):
+        return "bank"
+    if value in ("ai", "ai-questionnaire", "ai-questionaire", "ai questionnaire", "ai questionaire",
+                 "questionnaire", "questionaire", "generated"):
+        return "ai"
+    if not value:
+        return "ai"
+    raise ValueError("Question source must be AI Questionnaire or Product Question Bank.")
+
+
 def provision_employee(details: dict) -> dict:
     employee_id = str(details.get("employee_id") or "").strip()
     full_name = str(details.get("full_name") or "").strip()
@@ -279,24 +311,31 @@ def provision_employee(details: dict) -> dict:
     product = " ".join(str(details.get("product") or "").split())
     designation = str(details.get("designation") or "").strip()
     department = str(details.get("department") or "").strip()
+    question_source = _question_source(details)
     if not employee_id or len(employee_id) > 40 or not re.fullmatch(r"[A-Za-z0-9._-]+", employee_id):
         raise ValueError("Employee ID is required and may contain only letters, numbers, periods, underscores, and hyphens.")
     if not full_name or len(full_name) > 120:
         raise ValueError("Name is required and must be 120 characters or fewer.")
     if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
         raise ValueError("A valid employee email address is required.")
-    if not product:
-        raise ValueError("Product is required.")
-    configs = _products()
-    config = configs.get(product_key(product))
-    if not config:
-        raise ValueError(f"No question bank is configured for product {product!r}.")
+    config = None
+    if question_source == "bank":
+        configs = _products()
+        config = configs.get(product_key(product)) if product else None
+        if not product:
+            raise ValueError("Product is required when using the product question bank.")
+        if not config:
+            raise ValueError(f"No question bank is configured for product {product!r}.")
+        product = config["product"]
+    else:
+        product = accounts.AI_QUESTIONNAIRE_PRODUCT
+        config = None
     existing = accounts.get_account(employee_id)
     if existing and existing.get("role") != "employee":
         raise ValueError("This Employee ID is already assigned to a non-employee account.")
     existing_test = None
     bank_questions = None
-    if existing:
+    if existing and config is not None:
         employee_uuid = accounts.employee_uuid(employee_id)
         if employee_uuid:
             existing_test = get_store().first(
@@ -305,17 +344,16 @@ def provision_employee(details: dict) -> dict:
             )
             if existing_test:
                 bank_questions = _bank_questions(product_key(config["product"]), config["bankVersion"])
-    product_changed = bool(existing and product_key(existing.get("product")) != product_key(config["product"]))
+    product_changed = bool(existing and config is not None and product and existing.get("product") and product_key(existing.get("product")) != product_key(product))
     assignment_matches = bool(
-        existing_test
-        and not product_changed
+        config is not None and existing_test and not product_changed
         and product_key(existing_test.get("topic_title")) == product_key(config["product"])
         and int(existing_test.get("total_questions") or 0) == int(config["questionCount"])
         and get_store().count("test_questions", {"test_id": existing_test["id"]}) == int(config["questionCount"])
         and bank_questions is not None
         and _assignment_uses_bank(existing_test["id"], bank_questions)
     )
-    if existing_test and not assignment_matches and existing_test.get("status") == "in_progress":
+    if existing_test and config is not None and not assignment_matches and existing_test.get("status") == "in_progress":
         raise ValueError("This employee has an in-progress assessment. Finish it before changing the product assignment.")
     if existing:
         needs_initial_password = not accounts.has_password(existing)
@@ -326,7 +364,8 @@ def provision_employee(details: dict) -> dict:
         account = {
             **existing, "full_name": full_name, "email": email, "designation": designation,
             "department": department or existing.get("department") or "general",
-            "product": config["product"], "role": "employee", "product_qb_eligible": True, "assessment_only": True,
+            "product": product, "role": "employee",
+            "product_qb_eligible": True, "assessment_only": config is not None,
         }
         if existing.get("email", "").strip().casefold() != email.casefold():
             account["email_verified"] = False
@@ -341,8 +380,8 @@ def provision_employee(details: dict) -> dict:
         password_hash, password_salt = accounts.hash_password(employee_id)
         account = {
             "employee_id": employee_id, "full_name": full_name, "email": email, "designation": designation,
-            "department": department or "general", "role": "employee", "product": config["product"],
-            "product_qb_eligible": True, "assessment_only": True, "is_first_login": False, "email_verified": False,
+            "department": department or "general", "role": "employee", "product": product,
+            "product_qb_eligible": True, "assessment_only": config is not None, "is_first_login": False, "email_verified": False,
             "password_hash": password_hash, "password_salt": password_salt,
             "xp_points": 0, "streak_days": 0, "skill_level": "beginner", "ai_readiness_score": 0,
         }
@@ -351,25 +390,28 @@ def provision_employee(details: dict) -> dict:
     saved = accounts.get_account(employee_id)
     if not saved:
         raise RuntimeError(f"Employee account {employee_id} was not available after saving.")
-    if assignment_matches and existing_test:
-        assignment = {"testId": existing_test["id"], "questionCount": int(existing_test["total_questions"])}
+    if config is not None:
+        if assignment_matches and existing_test:
+            assignment = {"testId": existing_test["id"], "questionCount": int(existing_test["total_questions"]) }
+        else:
+            try:
+                assignment = assign_product_test(saved, config)
+            except Exception:
+                if not existing:
+                    get_store().delete("employees", {"employee_id": employee_id})
+                raise
     else:
-        try:
-            assignment = assign_product_test(saved, config)
-        except Exception:
-            if not existing:
-                get_store().delete("employees", {"employee_id": employee_id})
-            raise
+        assignment = {"testId": None, "questionCount": 0}
     return {
         "employeeId": saved["employee_id"], "name": saved["full_name"], "email": saved["email"],
         "designation": saved["designation"], "product": saved["product"],
         "firstLoginPassword": employee_id if default_password_active else None,
         "testId": assignment["testId"], "questionCount": assignment["questionCount"],
-        "created": existing is None,
+        "created": existing is None, "questionSource": question_source,
     }
 
 
-def parse_employee_upload(content: bytes, filename: str) -> list[dict]:
+def parse_employee_upload(content: bytes, filename: str, question_source: str | None = None) -> list[dict]:
     suffix = filename.rsplit(".", 1)[-1].casefold()
     if suffix == "csv":
         try:
@@ -402,14 +444,26 @@ def parse_employee_upload(content: bytes, filename: str) -> list[dict]:
         "designation": column("role", "designation", "job role"),
         "product": column("product"),
     }
-    if any(indices[name] is None for name in ("employee_id", "full_name", "email", "product")):
-        raise ValueError("Roster columns must include Emp ID, Name, Email, and Product. Role/Designation is optional.")
+    if any(indices[name] is None for name in ("employee_id", "full_name", "email")):
+        raise ValueError("Roster columns must include Emp ID, Name, and Email. Role/Designation and Product are optional.")
+    source = (question_source or "").strip().casefold()
+    if source in ("bank", "product-bank", "product_question_bank", "product question bank"):
+        source = "bank"
+    elif source in ("ai", "ai-questionnaire", "ai-questionaire", "ai questionnaire", "ai questionaire",
+                    "questionnaire", "questionaire", "generated"):
+        source = "ai"
+    elif source:
+        raise ValueError("Question source must be AI Questionnaire or Product Question Bank.")
+    if source == "bank" and indices["product"] is None:
+        raise ValueError("Roster columns must include Product when using the product question bank.")
     records = []
     for line, row in enumerate(rows[1:], start=2):
         if not any(_cell(value) for value in row):
             continue
+        product = _cell(row[indices["product"]]) if indices["product"] is not None and indices["product"] < len(row) else ""
         records.append({
             **{name: _cell(row[index]) if index is not None and index < len(row) else "" for name, index in indices.items()},
+            "questionType": source or "ai",
             "_row": line,
         })
     if not records:

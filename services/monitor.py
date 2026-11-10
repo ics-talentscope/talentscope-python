@@ -1,5 +1,6 @@
 import hashlib
 import json
+import logging
 import os
 import re
 import threading
@@ -13,6 +14,7 @@ from core.config import UPLOAD_DIR, env
 from core.db import MssqlStore, get_store
 from services import llm, question_queue
 
+log = logging.getLogger("talentscope")
 CACHE_S = 8.0
 STALE_AFTER_S = 180
 PERMISSION_HINTS = ("permission", "denied", "external policy action")
@@ -118,6 +120,7 @@ def server_info() -> dict:
                LEFT(@@VERSION, CHARINDEX(CHAR(10), @@VERSION + CHAR(10)) - 1) AS versionLine,
                DB_NAME() AS currentDb, SUSER_SNAME() AS [login], SYSDATETIMEOFFSET() AS serverTime,
                HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE') AS viewServerState,
+               HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER PERFORMANCE STATE') AS viewServerPerformanceState,
                HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'VIEW DATABASE STATE') AS viewDatabaseState,
                IS_MEMBER('db_owner') AS dbOwner, IS_SRVROLEMEMBER('sysadmin') AS sysadmin""")[0]
     try:
@@ -633,6 +636,7 @@ SHORT_WINDOW_S = 6 * 3600
 DB_SAMPLE_S = 60
 DB_PRUNE_S = 3600
 _sampler = {"started": False, "prev_batch": None, "last_prune": 0.0}
+_sampler_permissions = {"warned": False}
 _history_lock = threading.Lock()
 
 
@@ -734,6 +738,21 @@ def db_point() -> dict:
     store = get_store()
     if isinstance(store, MssqlStore):
         point["poolInUse"] = store.pool_stats()["inUse"]
+    permissions = rows("""
+        SELECT COALESCE(HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER STATE'), 0) AS viewServerState,
+               COALESCE(HAS_PERMS_BY_NAME(NULL, NULL, 'VIEW SERVER PERFORMANCE STATE'), 0) AS viewServerPerformanceState
+    """)[0]
+    can_read_server_metrics = bool(
+        permissions.get("viewServerState") or permissions.get("viewServerPerformanceState")
+    )
+    if not can_read_server_metrics:
+        if not _sampler_permissions["warned"]:
+            log.warning(
+                "SQL Server performance history is unavailable: the database login lacks VIEW SERVER STATE "
+                "and VIEW SERVER PERFORMANCE STATE; database-level health metrics remain available"
+            )
+            _sampler_permissions["warned"] = True
+        return point
     try:
         counters = {r["counter"]: float(r["value"]) for r in rows(COUNTERS_SQL)}
         point["userConnections"] = counters.get("User Connections")

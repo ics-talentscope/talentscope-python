@@ -15,6 +15,7 @@ PBKDF2_ITERATIONS = 120_000
 PBKDF2_KEY_LENGTH = 64
 PRODUCT_ASSESSMENT_TOPIC_ID = "resource-product-assessment"
 PRODUCT_ASSESSMENT_HISTORY_TOPIC_ID = "resource-product-assessment-history"
+AI_QUESTIONNAIRE_PRODUCT = "AI Questionnaire"
 
 COLUMNS = [
     "employee_id", "full_name", "email", "department", "role", "is_first_login", "password_hash", "password_salt",
@@ -68,6 +69,13 @@ def has_password(account: dict) -> bool:
 
 def is_product_qb_employee(account: dict) -> bool:
     return account.get("role") != "admin" and account.get("product_qb_eligible") is True
+
+
+def is_ai_questionnaire_employee(account: dict) -> bool:
+    return (
+        is_product_qb_employee(account)
+        and str(account.get("product") or "").strip().casefold() == AI_QUESTIONNAIRE_PRODUCT.casefold()
+    )
 
 
 def is_assessment_only_employee(account: dict) -> bool:

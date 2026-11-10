@@ -1,9 +1,13 @@
 import json
+import logging
 import random
 from functools import lru_cache
 from pathlib import Path
 
+from services import llm
+
 DATA = Path(__file__).resolve().parents[1] / "data" / "learning_fallback.json"
+log = logging.getLogger("talentscope")
 
 STEMS = [
     "What is the primary objective of {topic} in the context of {subject}?",
@@ -70,11 +74,11 @@ DISTRACTORS = [
 
 def map_difficulty(diff) -> str:
     d = str(diff).lower().strip()
-    if d in ("easy", "beginner"):
+    if d in ("basic", "easy", "beginner"):
         return "beginner"
     if d in ("medium", "intermediate"):
         return "intermediate"
-    if d in ("hard", "advanced"):
+    if d in ("high", "hard", "advanced"):
         return "advanced"
     if d == "expert":
         return "expert"
@@ -133,6 +137,64 @@ def fetch_questions(subject: str, topic: str, difficulty: str, count: int = 10) 
     bank = build_databank(subject, topic, difficulty)
     random.shuffle(bank)
     return bank[:count]
+
+
+def generate_ai_questions(subject: str, topic: str, difficulty: str, count: int = 10) -> list[dict]:
+    prompt = f"""Create exactly {count} original multiple-choice assessment questions for an employee learning quiz.
+Subject: {subject}
+Topic: {topic}
+Difficulty: {difficulty}
+
+Requirements:
+- Assess understanding of the named topic at the requested difficulty.
+- Each question must have exactly four distinct, plausible answer options.
+- Exactly one option must be correct; do not make the answer obvious from wording.
+- Include a concise explanation of why the correct option is right.
+- Return only a JSON array. Each item must have this shape:
+  {{"question":"...","options":["...","...","...","..."],"correctIndex":0,"explanation":"...","difficulty":"{difficulty}"}}
+"""
+    try:
+        generated = llm.complete_json(
+            prompt,
+            temperature=0.3,
+            max_tokens=3072,
+            timeout_s=180,
+            priority=llm.PRIORITY_LIVE,
+        )
+        if isinstance(generated, dict):
+            generated = generated.get("questions")
+        if not isinstance(generated, list) or len(generated) < count:
+            raise llm.LlmError(f"Local LLM returned fewer than {count} complete questions.")
+
+        questions = []
+        for item in generated[:count]:
+            if not isinstance(item, dict):
+                raise llm.LlmError("Local LLM returned a question with an invalid shape.")
+            question = str(item.get("question") or item.get("question_text") or "").strip()
+            options = item.get("options")
+            correct_index = item.get("correctIndex", item.get("correct_option_index"))
+            if (
+                not question
+                or not isinstance(options, list)
+                or len(options) != 4
+                or any(not isinstance(option, str) or not option.strip() for option in options)
+                or len({option.strip().casefold() for option in options}) != 4
+                or isinstance(correct_index, bool)
+                or not isinstance(correct_index, int)
+                or not 0 <= correct_index < 4
+            ):
+                raise llm.LlmError("Local LLM returned an invalid multiple-choice question.")
+            questions.append({
+                "question": question,
+                "options": [option.strip() for option in options],
+                "correctIndex": correct_index,
+                "explanation": str(item.get("explanation") or "").strip(),
+                "difficulty": map_difficulty(item.get("difficulty") or difficulty),
+            })
+        return questions
+    except llm.LlmError as err:
+        log.warning("AI question generation unavailable; using the built-in topic question fallback: %s", err)
+        return fetch_questions(subject, topic, difficulty, count)
 
 
 def to_rows(test_id: str, generated: list[dict], topic_id: str, topic_title: str, default_difficulty: str) -> list[dict]:
