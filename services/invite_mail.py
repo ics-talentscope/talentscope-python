@@ -33,3 +33,21 @@ def build_invite_html(full_name: str, login_hint: str, portal_url: str, label: s
   </div>
 </div>
 """
+
+
+def build_password_reset_html(full_name: str, email: str, portal_url: str, password: str) -> str:
+    name = escape(full_name)
+    address = escape(email)
+    url = escape(portal_url, quote=True)
+    temporary_password = escape(password)
+    return f"""
+<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 30px; border: 1px solid #e0e7ff; border-radius: 16px; background-color: #ffffff;">
+  <h2 style="color: #1e1b4b;">TalentScope assessment password reset</h2>
+  <p>Dear <strong>{name}</strong>,</p>
+  <p>Your temporary password has been reset. Use the email address and password below to sign in to your assessment.</p>
+  <p>Login email: <strong>{address}</strong></p>
+  <p>Temporary password: <strong>{temporary_password}</strong></p>
+  <p><a href="{url}">Open the assessment portal</a></p>
+  <p>Your previous password is no longer valid.</p>
+</div>
+"""

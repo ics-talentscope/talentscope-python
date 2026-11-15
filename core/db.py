@@ -9,7 +9,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Iterable, Optional, Union
 
-from core.config import db_target, env, mssql_settings, supabase_settings
+from core.config import db_target, mssql_settings, supabase_settings
 from core.logger import logger
 from core import request_context
 
@@ -44,6 +44,7 @@ UUID_VALUE_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a
 ISO_VALUE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:?\d{2})?$")
 MAX_IN = 1000
 OPS = {"eq": "=", "neq": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<=", "like": "LIKE"}
+TABLES_WITHOUT_ID = {"portal_settings", "question_sets"}
 
 Where = Union[None, dict, list]
 
@@ -452,7 +453,7 @@ class MssqlStore(Store):
     def _insert_one(self, table: str, row: dict) -> dict:
         json_cols = JSON_COLUMNS.get(table, set())
         data = dict(row)
-        if table != "portal_settings" and not data.get("id"):
+        if table not in TABLES_WITHOUT_ID and not data.get("id"):
             data["id"] = str(uuid.uuid4())
         cols = list(data.keys())
         marks = ",".join("?" for _ in cols)
@@ -702,7 +703,7 @@ class SupabaseStore(Store):
         return [decode_row(table, row) for row in rows]
 
     def count(self, table, where=None):
-        params = [("select", "id")] + self._where(table, normalize_where(where))
+        params = [("select", "*")] + self._where(table, normalize_where(where))
         response, _ = self._request("HEAD", table, params, prefer="count=exact")
         content_range = response.headers.get("content-range", "")
         total = content_range.rsplit("/", 1)[-1]
@@ -712,7 +713,7 @@ class SupabaseStore(Store):
 
     def _insert_one(self, table: str, row: dict) -> dict:
         data = dict(row)
-        if table != "portal_settings" and not data.get("id"):
+        if table not in TABLES_WITHOUT_ID and not data.get("id"):
             data["id"] = str(uuid.uuid4())
         payload = {col: self._value(table, col, value) for col, value in data.items()}
         _, rows = self._request("POST", table, payload=payload, prefer="return=representation")
@@ -742,7 +743,7 @@ class SupabaseStore(Store):
     def upsert(self, table, row, key):
         keys = [key] if isinstance(key, str) else list(key)
         data = dict(row)
-        if table != "portal_settings" and not data.get("id"):
+        if table not in TABLES_WITHOUT_ID and not data.get("id"):
             data["id"] = str(uuid.uuid4())
         params = [("on_conflict", ",".join(self._ident(col) for col in keys))]
         payload = {col: self._value(table, col, value) for col, value in data.items()}
@@ -827,9 +828,9 @@ class MemoryStore(Store):
             out = []
             for item in items:
                 data = dict(item)
-                if table != "portal_settings" and not data.get("id"):
+                if table not in TABLES_WITHOUT_ID and not data.get("id"):
                     data["id"] = str(uuid.uuid4())
-                if "created_at" not in data and table != "portal_settings":
+                if "created_at" not in data and table not in TABLES_WITHOUT_ID:
                     data["created_at"] = datetime.now(timezone.utc).isoformat()
                 self._rows(table).append(data)
                 out.append(dict(data))
@@ -874,7 +875,7 @@ def get_store() -> Store:
     if _store is None:
         with _store_lock:
             if _store is None:
-                use_supabase = db_target() == "SUPABASE" or env("DB_PROVIDER").lower() == "supabase"
+                use_supabase = db_target() == "SUPABASE"
                 _store = SupabaseStore() if use_supabase else MssqlStore()
     return _store
 

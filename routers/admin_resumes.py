@@ -11,7 +11,7 @@ from core.errors import json_error, public_error
 from core.security import get_client_ip
 from core.validation import as_email, as_uuid
 from services import admin_accounts, audit, mailer, question_queue, reset_logs, resumes, sessions, storage
-from services.invite_mail import build_invite_html
+from services.invite_mail import build_invite_html, build_password_reset_html
 from services.structured_log import write_log
 
 log = logging.getLogger("talentscope")
@@ -217,7 +217,7 @@ def invite(resume_id: str, request: Request, body: dict = Body(default_factory=d
                 question_queue.reset(rid)
             except Exception as err:
                 log.error("Failed to delete existing interview questions on config update: %s", err)
-        candidate_password = sessions.issue_candidate_password(email, rid)
+        candidate_password = sessions.generate_candidate_password()
         if not question_queue.existing_questions(rid):
             question_queue.enqueue(rid)
         kind = (config or {}).get("interviewType") or "technical"
@@ -232,7 +232,29 @@ def invite(resume_id: str, request: Request, body: dict = Body(default_factory=d
         )
         status, send_error = mailer.dispatch(email, subject, html)
         rm_email = (resume.get("report") or {}).get("rmEmail") or "admin@infinite.com"
+        if status == "failed_real_fallback_simulated":
+            mailer.record(
+                email, full_name, subject,
+                "<p>SMTP delivery failed. Candidate credentials were not changed.</p>",
+                status, rm_email,
+            )
+            audit.add_log(rm_email, "ADMIN_INVITE_CANDIDATE_FAILED", email,
+                          f"Invitation email was not delivered. Status: {status}. Subject: {subject}", get_client_ip(request))
+            write_log("email", "INVITE_CANDIDATE", "failed",
+                      f"Failed to deliver invitation email to {email}. Status: {status}.")
+            return json_error(
+                503,
+                send_error or "Could not deliver the candidate invitation.",
+                success=False,
+                email=email,
+                fullName=full_name,
+                status=status,
+            )
+        sessions.save_candidate_password(email, rid, candidate_password)
         mailer.record(email, full_name, subject, html, status, rm_email)
+        if status == "sent":
+            resume["report"] = {**(resume.get("report") or {}), "inviteEmailStatus": "sent"}
+            resumes.save_row(resume)
         audit.add_log(rm_email, "ADMIN_INVITE_CANDIDATE", email,
                       f"Dispatched assessment invitation email. Status: {status}. Subject: {subject}", get_client_ip(request))
         write_log("email", "INVITE_CANDIDATE", "success", f"Dispatched assessment invitation email to {email}. Status: {status}. Subject: {subject}")
@@ -240,3 +262,58 @@ def invite(resume_id: str, request: Request, body: dict = Body(default_factory=d
     except Exception as err:
         write_log("email", "INVITE_CANDIDATE_FAILED", "failed", f"Failed to send invite email to candidate ID {rid}")
         return public_error(err, "Could not prepare or send the candidate invitation. Verify the candidate email and mail service.")
+
+
+@router.post("/{resume_id}/reset-password")
+def reset_candidate_password(resume_id: str, request: Request):
+    rid = as_uuid(resume_id)
+    resume = resumes.get_resume(rid) if rid else None
+    if not resume:
+        return json_error(404, "Resume record not found")
+    email = as_email((resume.get("parsed") or {}).get("personal", {}).get("email"))
+    if not email:
+        return json_error(400, "Candidate email is missing or invalid.")
+
+    store = get_store()
+    try:
+        delivered_invite = (resume.get("report") or {}).get("inviteEmailStatus") == "sent"
+        if not delivered_invite:
+            delivered_invite = bool(store.first(
+                "simulated_emails",
+                {"candidate_email": email, "status": "sent"},
+            ))
+        if not delivered_invite:
+            return json_error(409, "Send a successful invitation email before resetting this candidate's password.")
+
+        session = store.first("candidate_sessions", {"email": email})
+        if not session or session.get("resume_id") != rid:
+            return json_error(409, "The candidate does not have an active assessment invitation.")
+        if session.get("used"):
+            return json_error(409, "This candidate has already completed the assessment.")
+
+        password = sessions.generate_candidate_password()
+        full_name = (resume.get("parsed") or {}).get("personal", {}).get("fullName") or "Candidate"
+        subject = "TalentScope — Assessment Password Reset"
+        html = build_password_reset_html(full_name, email, app_url(), password)
+        status, send_error = mailer.dispatch(email, subject, html)
+        if status != "sent":
+            actor = acting_admin_email(request) or "unknown"
+            audit.add_log(actor, "ADMIN_RESET_CANDIDATE_PASSWORD_FAILED", email,
+                          f"Password reset email was not delivered. Status: {status}.", get_client_ip(request))
+            write_log("email", "RESET_CANDIDATE_PASSWORD", "failed",
+                      f"Password reset email was not delivered to {email}. Status: {status}.")
+            return json_error(503, send_error or "Could not deliver the password reset email.")
+
+        sessions.save_candidate_password(email, rid, password)
+        rm_email = (resume.get("report") or {}).get("rmEmail") or "admin@infinite.com"
+        mailer.record(email, full_name, subject, html, status, rm_email)
+        actor = acting_admin_email(request) or "unknown"
+        audit.add_log(actor, "ADMIN_RESET_CANDIDATE_PASSWORD", email,
+                      "Delivered a new temporary assessment password.", get_client_ip(request))
+        write_log("email", "RESET_CANDIDATE_PASSWORD", "success",
+                  f"Delivered a new assessment password to {email}.")
+        return {"success": True, "email": email, "status": status}
+    except Exception as err:
+        write_log("email", "RESET_CANDIDATE_PASSWORD_FAILED", "failed",
+                  f"Failed to reset assessment password for candidate {rid}.")
+        return public_error(err, "Could not reset the candidate password.")

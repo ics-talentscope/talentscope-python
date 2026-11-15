@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import json
 import re
@@ -80,16 +81,167 @@ def test_questions_fall_back_to_defaults_when_qwen_down(client, store, monkeypat
     assert store.count("interview_questions", {"resume_id": RID}) == 5
 
 
+def test_fallback_claim_verifies_database_update_when_rowcount_is_zero(store, monkeypatch):
+    seed_candidate(store, interviewConfig={"interviewType": "technical", "sections": {"overlapping": 2, "gap": 1, "projects": 1, "coding": 1}})
+    store.insert("question_sets", {"resume_id": RID, "status": "running", "attempts": 1, "served": None})
+    original_update = store.update
+
+    def update_with_missing_rowcount(table, values, where):
+        updated = original_update(table, values, where)
+        if table == "question_sets" and "served" in values:
+            return 0
+        return updated
+
+    monkeypatch.setattr(store, "update", update_with_missing_rowcount)
+
+    assert question_queue.serve_fallback(RID)
+    assert len(question_queue.existing_questions(RID)) == 5
+    row = question_queue._row(RID)
+    assert row["status"] == "ready" and row["served"] == "fallback"
+
+
+def test_question_request_waits_for_slow_ai_generation_before_fallback(monkeypatch):
+    clock = {"now": 0.0}
+    monkeypatch.setattr(question_queue, "env_int", lambda _name, _default: 20)
+    monkeypatch.setattr(question_queue, "_begin", lambda _resume_id: None)
+    monkeypatch.setattr(
+        question_queue,
+        "_poll",
+        lambda _resume_id: ["AI generated question"] if clock["now"] >= 150 else None,
+    )
+    monkeypatch.setattr(question_queue, "_row", lambda _resume_id: {"status": "running"})
+    monkeypatch.setattr(question_queue, "workers_alive", lambda: True)
+    monkeypatch.setattr(question_queue.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        question_queue.time,
+        "sleep",
+        lambda delay: clock.__setitem__("now", clock["now"] + delay),
+    )
+    monkeypatch.setattr(question_queue, "_finalize", lambda _resume_id: pytest.fail("fallback ran before AI generation finished"))
+
+    assert question_queue.ensure_sync(RID) == ["AI generated question"]
+
+
+def test_async_question_request_waits_for_active_ai_job(monkeypatch):
+    results = iter([None, None, ["AI generated question"]])
+    monkeypatch.setattr(question_queue, "_begin", lambda _resume_id: None)
+    monkeypatch.setattr(question_queue, "_poll", lambda _resume_id: next(results))
+    monkeypatch.setattr(question_queue, "_row", lambda _resume_id: {"status": "running"})
+    monkeypatch.setattr(question_queue, "workers_alive", lambda: True)
+    monkeypatch.setattr(question_queue, "POLL_S", 0)
+    monkeypatch.setattr(question_queue, "_finalize", lambda _resume_id: pytest.fail("active AI job was preempted"))
+
+    assert asyncio.run(question_queue.ensure_async(RID)) == ["AI generated question"]
+
+
+def test_question_request_uses_fallback_after_ai_generation_fails(monkeypatch):
+    monkeypatch.setattr(question_queue, "_begin", lambda _resume_id: None)
+    monkeypatch.setattr(question_queue, "_poll", lambda _resume_id: None)
+    monkeypatch.setattr(question_queue, "_row", lambda _resume_id: {"status": "failed"})
+    monkeypatch.setattr(question_queue, "workers_alive", lambda: True)
+    monkeypatch.setattr(question_queue, "_finalize", lambda _resume_id: ["fallback question"])
+
+    assert question_queue.ensure_sync(RID) == ["fallback question"]
+
+
+def test_question_request_caps_active_generation_wait_at_five_minutes(monkeypatch):
+    clock = {"now": 0.0}
+    monkeypatch.setattr(question_queue, "env_int", lambda _name, _default: 600)
+    monkeypatch.setattr(question_queue, "_begin", lambda _resume_id: None)
+    monkeypatch.setattr(question_queue, "_poll", lambda _resume_id: None)
+    monkeypatch.setattr(question_queue, "_row", lambda _resume_id: {"status": "running"})
+    monkeypatch.setattr(question_queue, "workers_alive", lambda: True)
+    monkeypatch.setattr(question_queue.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(
+        question_queue.time,
+        "sleep",
+        lambda delay: clock.__setitem__("now", clock["now"] + delay),
+    )
+    monkeypatch.setattr(question_queue, "_finalize", lambda _resume_id: ["fallback question"])
+
+    assert question_queue.ensure_sync(RID, wait_s=600) == ["fallback question"]
+    assert clock["now"] == 300
+
+
+def test_candidate_questions_use_live_priority_and_technical_questions_are_ai_first(monkeypatch):
+    priorities = []
+
+    def fake_complete_json(_prompt, **kwargs):
+        priorities.append(kwargs["priority"])
+        return [{"question": "Tell me about a time you collaborated with a team."}]
+
+    monkeypatch.setattr(question_gen.llm, "complete_json", fake_complete_json)
+    assert question_gen.ai_non_tech({"behavioral": 1, "leadership": 0, "softskills": 0}, "resume facts", "job facts")
+    assert priorities == [llm.PRIORITY_LIVE]
+    question_gen._ask("background question bank prompt", 100)
+    assert priorities[-1] == llm.PRIORITY_BATCH
+
+    verbal_requests = []
+
+    def fake_verbal(overlap, gap, projects, _brief, _jd, _taken):
+        verbal_requests.append((overlap, gap, projects))
+        return [f"AI verbal question {index}" for index in range(overlap + gap + projects)]
+
+    monkeypatch.setattr(question_gen, "resolve_language", lambda *_args: {"language": "python", "basis": "resume"})
+    monkeypatch.setattr(question_gen, "stack_keys", lambda *_args: ["python"])
+    monkeypatch.setattr(question_gen, "candidate_brief", lambda _resume: "resume facts")
+    monkeypatch.setattr(question_gen, "ai_verbal", fake_verbal)
+    monkeypatch.setattr(
+        question_gen,
+        "ai_coding",
+        lambda count, _language, _brief, _jd: [f"AI coding question {index}" for index in range(count)],
+    )
+    generated = question_gen.build_set(
+        {"parsed": {}},
+        {"interviewType": "technical", "sections": {"overlapping": 2, "gap": 1, "projects": 1, "coding": 1}},
+        "job facts",
+        True,
+        RID,
+    )
+
+    assert verbal_requests == [(2, 1, 1)]
+    assert len(generated["items"]) == 5
+    assert {item["source"] for item in generated["items"]} == {"ai"}
+
+
+def test_questions_recover_an_orphaned_fallback_claim(client, store, monkeypatch):
+    auth = seed_candidate(store, interviewConfig={"interviewType": "technical", "sections": {"overlapping": 2, "gap": 1, "projects": 1, "coding": 1}})
+    store.seed("question_sets", [{"resume_id": RID, "status": "running", "attempts": 1, "served": "fallback"}])
+    monkeypatch.setattr(question_queue, "workers_alive", lambda: False)
+
+    response = client.get(f"/api/interview/{RID}/questions", headers=auth)
+
+    assert response.status_code == 200 and len(response.json()) == 5
+    row = question_queue._row(RID)
+    assert row["status"] == "ready" and row["served"] == "fallback"
+
+
 def test_questions_serve_generated_output(client, store, monkeypatch):
     auth = seed_candidate(store, interviewConfig={"interviewType": "technical", "sections": {"overlapping": 1, "gap": 1, "projects": 0, "coding": 1}})
     expected = ["Q one?", "Coding Challenge: do x"]
-    monkeypatch.setattr(question_queue.llm, "is_up", lambda: False)
+    monkeypatch.setattr(question_queue, "workers_alive", lambda: False)
     monkeypatch.setattr(
         question_gen,
         "build_set",
         lambda *args: {"items": [{"text": question} for question in expected], "language": "python"},
     )
     assert client.get(f"/api/interview/{RID}/questions", headers=auth).json() == expected
+
+
+def test_questions_fall_back_when_question_queue_registration_fails(client, store, monkeypatch):
+    seed_candidate(store, interviewConfig={"interviewType": "technical", "sections": {"overlapping": 2, "gap": 1, "projects": 1, "coding": 1}})
+    auth = {"Authorization": f"Bearer {sign_interview_token(RID)}"}
+    original_insert = store.insert
+
+    def insert_without_question_set(table, rows):
+        if table == "question_sets":
+            raise RuntimeError("question queue unavailable")
+        return original_insert(table, rows)
+
+    monkeypatch.setattr(store, "insert", insert_without_question_set)
+    response = client.get(f"/api/interview/{RID}/questions", headers=auth)
+    assert response.status_code == 200 and len(response.json()) == 5
+    assert store.count("interview_questions", {"resume_id": RID}) == 5
 
 
 def test_questions_unknown_resume_and_bad_id(client, store):
@@ -153,6 +305,10 @@ def test_verify_id_with_face_service(client, store, monkeypatch, tmp_path):
     assert report["verification"]["status"] == "verified"
     assert client.get(f"/api/interview/{RID}/verification/id", headers=auth).status_code == 200
     assert client.get(f"/api/interview/{RID}/verification/other", headers=auth).status_code == 404
+    assert store.first("candidate_sessions", {"email": "c@x.com"})["used"] is False
+    started = client.post(f"/api/interview/{RID}/start", headers=auth)
+    assert started.status_code == 200 and started.json()["data"]["startedAt"]
+    assert store.first("candidate_sessions", {"email": "c@x.com"})["used"] is False
 
 
 def test_verify_id_engine_down_is_system_error(client, store, monkeypatch, tmp_path):

@@ -57,6 +57,15 @@ def test_identifiers_are_validated():
         store.update("tests", {"a b": 1}, {"id": 1})
 
 
+def test_question_sets_insert_uses_resume_id_without_adding_id_column():
+    store = Recorder()
+    store.insert("question_sets", {"resume_id": "resume-1", "status": "queued"})
+
+    statement, params = store.sql[-1]
+    assert "[resume_id]" in statement and "[id]" not in statement
+    assert params == ("resume-1", "queued")
+
+
 def test_connection_string_escapes_password():
     store = Recorder()
     store.settings["password"] = "pa}ss;word"

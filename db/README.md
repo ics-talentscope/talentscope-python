@@ -1,6 +1,6 @@
 # TalentScope Database (MS SQL Server)
 
-This directory contains the database schema migrations, optional baseline datasets, and deployment scripts for **Microsoft SQL Server** (local, remote, or Azure SQL), plus the **Supabase/PostgreSQL** schema. The Python API can connect to either database using `DB_TARGET`. The seed JSON files are excluded from Git and Docker by default because they contain personal data; provide approved datasets privately if you need to seed a database.
+This directory contains the active **Microsoft SQL Server** (local, remote, or Azure SQL) schema migrations, optional baseline datasets, and deployment scripts, plus isolated **Supabase/PostgreSQL** assets. The API defaults to SQL Server; its optional Supabase adapter is selected only by explicitly setting `DB_TARGET=SUPABASE`. The seed JSON files are excluded from Git and Docker by default because they contain personal data; provide approved datasets privately if you need to seed a database.
 
 ---
 
@@ -8,7 +8,7 @@ This directory contains the database schema migrations, optional baseline datase
 
 | Path | Description |
 |---|---|
-| `mssql/migrations/*.sql` | Ordered SQL DDL migrations (applied sequentially, tracked in `__migrations` table) |
+| `mssql/migrations/*.sql` | Ordered SQL Server DDL migrations (tracked in `__migrations`) |
 | `mssql/data/*.json` | Baseline table seed datasets (employees, job descriptions, test questions, settings) |
 | `scripts/migrate.ts` | Migration runner (applies unapplied `.sql` scripts and verifies checksums) |
 | `scripts/deploy-data.ts` | Data deployment engine (inserts or upserts baseline datasets into target DB) |
@@ -17,7 +17,7 @@ This directory contains the database schema migrations, optional baseline datase
 | `mssql/migrations/005_system_logs.sql` | Structured application/request/database log storage |
 | `supabase/config.toml` | Supabase CLI local-development configuration |
 | `supabase/migrations/*.sql` | PostgreSQL schema migrations for Supabase |
-| `postgres/migrations/*.sql` | PostgreSQL migrations applied by `scripts/migrate_postgres.py` |
+| `postgres/migrations/*.sql` | Ordered PostgreSQL migrations applied by `scripts/migrate_postgres.py` |
 
 ---
 
@@ -62,11 +62,33 @@ npm run db:deploy-data -- --dry-run
 npm run db:deploy-data
 ```
 
+Seed deployment is additive: it inserts missing primary keys, updates only rows whose
+values differ, and leaves identical or unlisted existing rows untouched. It never deletes
+rows; the old `--prune` option is rejected.
+
 ### 5. Combined One-Step Setup (Local)
 Runs both migrations and baseline data deployment against local SQL Server:
 ```powershell
 npm run db:local
 ```
+
+## Data-preserving migration policy
+
+- Migrations are ordered by filename within their engine-specific directory. SQL Server and
+  PostgreSQL use numbered names; Supabase uses timestamp names.
+- Applied migration files are immutable. Do not edit or renumber them; the repeated `005`
+  prefixes in the existing SQL Server and PostgreSQL histories are retained so migration
+  ledgers remain valid. Start new numbered migrations after `012`.
+- Migration runners reject pending SQL containing row deletes, truncation, table/column
+  drops, or database/schema drops. Additive and conditional schema changes are allowed.
+- Bulk provisioning must preserve assessment history. In particular,
+  `../scripts/bulk_tpm_upskilling.py` leaves started/completed tests and their attempts
+  untouched; for an unstarted pending test it adds only missing question text and never
+  deletes or replaces existing questions.
+- The migration ledger is part of the history and must not be dropped to bypass a checksum
+  mismatch. Restore the original applied file and add a new migration for the change.
+- `supabase:reset` is a local development reset, not a migration command; do not use it
+  against a database whose data must be retained.
 
 ### Application logs
 
@@ -100,7 +122,9 @@ npm run db:azure
 
 ## Supabase Data API runtime
 
-The API uses Supabase's HTTPS Data API. Set `DB_TARGET=SUPABASE` in the repo `.env.local`, and configure:
+This is an isolated optional runtime, not part of the active SQL Server deployment. The API
+uses Supabase's HTTPS Data API only when `DB_TARGET=SUPABASE` is explicitly set in the repo
+`.env.local`; configure:
 
 ```dotenv
 NEXT_PUBLIC_SUPABASE_URL=https://<project-ref>.supabase.co
@@ -145,17 +169,13 @@ npm run supabase:stop
 
 ### 4. `Migration Checksum Mismatch`
 - **Cause**: An existing `.sql` migration file was modified after it was already applied to the database.
-- **Fix**: Never edit applied migrations. Create a new migration file (e.g. `006_new_feature.sql`). If developing locally and resetting:
-  ```sql
-  DROP TABLE __migrations;
-  ```
-  Then re-run `npm run db:migrate`.
+- **Fix**: Restore the original applied migration file and put the change in a new numbered migration. Keep the migration ledger and existing data intact.
 
 ---
 
 ## 📜 Adding New Migrations
 
-1. Create a new file in `mssql/migrations/` following the naming convention `00X_description.sql`.
-2. Ensure DDL statements are idempotent or safe for migration.
+1. Create a new file in the engine-specific migrations directory. For SQL Server and PostgreSQL, continue after migration `012` (for example, `013_description.sql`); use a new timestamp for Supabase.
+2. Keep the script data-preserving and make DDL statements idempotent or conditional where possible.
 3. If new tables are introduced, add them to `TABLES` in [`scripts/lib/tables.ts`](file:///scripts/lib/tables.ts).
 4. Run `npm run db:migrate` and verify with `npm run db:status`.

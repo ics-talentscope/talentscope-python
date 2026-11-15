@@ -149,7 +149,7 @@ def _headers() -> dict:
 def unavailable_message() -> str:
     return (
         f"Local Qwen ({model_name()}) is not running. Start it from python-ai/qwen with "
-        f'.\\llamafile-0.10.5.exe -m ".\\Qwen3.5-4B-Q4_K_M.gguf" --server (server {base_url()}).'
+        f'.\\llamafile-0.10.5.exe -m ".\\Qwen3.5-4B-Q4_K_M.gguf" --server --gpu auto (server {base_url()}).'
     )
 
 

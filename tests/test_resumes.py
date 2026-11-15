@@ -40,6 +40,37 @@ def test_parse_structure_extracts_sections():
     assert parsed["certifications"][0]["name"] == "AWS Certified Developer"
 
 
+def test_skills_only_include_source_mentions_with_safe_boundaries():
+    skills = resumes._skills("Python, JavaScript, and J2EE with ASP.NET and C# experience.")
+
+    assert skills["technical"] == ["javascript", "python", "j2ee", "c#", ".net"]
+    assert skills["soft"] == []
+    assert skills["tools"] == []
+    assert "java" not in skills["technical"]
+
+
+def test_resume_row_replaces_stale_skills_with_source_verified_skills():
+    resume = resumes._map_row({
+        "id": "resume-1",
+        "text_content": "Python developer",
+        "parsed": {
+            "skills": {
+                "technical": ["j2ee"],
+                "tools": ["git", "docker", "jira"],
+                "soft": ["communication", "leadership"],
+            }
+        },
+    })
+
+    assert resume["parsed"]["skills"] == {
+        "technical": ["python"],
+        "soft": [],
+        "tools": [],
+        "languages": [],
+        "other": [],
+    }
+
+
 def test_generate_report_thresholds():
     parsed = resumes.parse_structure(SAMPLE)
     report = resumes.generate_report(parsed, {"overallScore": 72, "jdMatchScore": 45, "weaknesses": [

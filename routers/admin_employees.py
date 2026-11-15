@@ -86,18 +86,27 @@ def _apply_jd_match(roster: list[dict], jd_id) -> list[dict]:
         return roster
     from services import skill_match
 
-    try:
-        jd = get_store().first("job_descriptions", {"id": jd_id}, ["jd_text"])
-        if not jd or not (jd.get("jd_text") or "").strip():
-            return roster
-        results = skill_match.score_people(jd["jd_text"], roster)
-    except Exception as err:
-        log.warning("Failed to recalculate employee skill match: %s", err)
-        return roster
+    jd = get_store().first("job_descriptions", {"id": jd_id}, ["jd_text"])
+    if not jd or not (jd.get("jd_text") or "").strip():
+        raise ValueError(f"Selected JD/BR {jd_id} was not found or has no text to score against.")
+    results = skill_match.score_people(jd["jd_text"], roster)
     out = []
     for emp, res in zip(roster, results):
         override = emp.get("score_override") if emp.get("score_override_jd_id") == jd_id and isinstance(emp.get("score_override"), (int, float)) else None
-        out.append({**emp, "score": override if override is not None else res["score"], "matchingSkills": res.get("matchingSkills") or []})
+        score = (
+            override
+            if override is not None and res.get("strictRequirementsPassed") is True
+            else min(override, res["score"])
+            if override is not None
+            else res["score"]
+        )
+        out.append({
+            **emp,
+            "score": score,
+            "matchingSkills": res.get("matchingSkills") or [],
+            "matchDecision": res.get("decision"),
+            "matchRationale": res.get("rationale") or "",
+        })
     return out
 
 
@@ -168,8 +177,9 @@ def shortlist(body: dict = Body(default_factory=dict)):
 @router.patch("")
 def update_employee(body: dict = Body(default_factory=dict)):
     employee_id = str(body.get("employeeId") or "").strip()
+    normalized_employee_id = corp_pool.normalize_employee_id(employee_id)
     updates = body.get("updates") if isinstance(body.get("updates"), dict) else {}
-    if not employee_id:
+    if not normalized_employee_id:
         return json_error(400, "Employee ID is required")
     if {"score", "score_override", "score_override_jd_id"}.intersection(updates):
         return json_error(400, "Score is calculated automatically and cannot be edited.")
@@ -177,13 +187,20 @@ def update_employee(body: dict = Body(default_factory=dict)):
         roster = corp_pool.load_roster()
         if not roster:
             return json_error(404, "Employees not loaded")
-        matched = next((e for e in roster if e["employee_id"] == employee_id), None)
+        matched = next(
+            (e for e in roster if corp_pool.normalize_employee_id(e["employee_id"]) == normalized_employee_id),
+            None,
+        )
         if not matched:
             return json_error(404, "Employee not found")
         next_id = str(updates.get("employee_id", matched["employee_id"]) or "").strip()
-        if not next_id:
+        normalized_next_id = corp_pool.normalize_employee_id(next_id)
+        if not normalized_next_id:
             return json_error(400, "Employee ID cannot be empty.")
-        if next_id != employee_id and any(e["employee_id"] == next_id for e in roster):
+        if normalized_next_id != normalized_employee_id and any(
+            corp_pool.normalize_employee_id(e["employee_id"]) == normalized_next_id
+            for e in roster
+        ):
             return json_error(409, f"Employee ID {next_id} already exists.")
         for field in EDITABLE:
             if field in updates:

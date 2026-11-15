@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import secrets
+import string
 import time
 import uuid
 from datetime import datetime, timezone
@@ -64,8 +65,18 @@ def create_candidate_session(email: str, resume_id: str) -> dict:
 
 
 def issue_candidate_password(email: str, resume_id: str) -> str:
+    password = generate_candidate_password()
+    save_candidate_password(email, resume_id, password)
+    return password
+
+
+def generate_candidate_password() -> str:
+    alphabet = string.ascii_letters + string.digits
+    return "".join(secrets.choice(alphabet) for _ in range(12))
+
+
+def save_candidate_password(email: str, resume_id: str, password: str) -> None:
     clean = email.lower().strip()
-    password = secrets.token_urlsafe(12)
     salt = secrets.token_hex(16)
     digest = hashlib.pbkdf2_hmac(
         "sha256", password.encode("utf-8"), salt.encode("ascii"), CANDIDATE_PASSWORD_ITERATIONS
@@ -86,7 +97,6 @@ def issue_candidate_password(email: str, resume_id: str) -> str:
     )
     if not row:
         raise RuntimeError("Could not save candidate login credentials.")
-    return password
 
 
 def verify_candidate_password(email: str, password: str) -> Optional[dict]:

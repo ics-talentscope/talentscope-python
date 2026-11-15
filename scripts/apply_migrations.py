@@ -13,6 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from core.config import mssql_settings
 from core.db import MssqlStore
+from core.migration_safety import assert_data_preserving_migration
 
 GO_LINE = re.compile(r"^\s*GO\s*(?:--.*)?$", re.IGNORECASE)
 
@@ -124,6 +125,8 @@ def apply(status_only: bool = False) -> None:
         if not pending:
             print(f"No pending migrations on {settings['server']}/{settings['database']}.")
             return
+        for item in pending:
+            assert_data_preserving_migration(item["file"], item["text"])
         print(f"Applying {len(pending)} migration(s) to {settings['server']}/{settings['database']}...")
         for item in pending:
             batches = split_batches(item["text"])

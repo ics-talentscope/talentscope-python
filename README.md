@@ -1,6 +1,6 @@
 # TalentScope Python API
 
-FastAPI backend with SQL Server and Supabase PostgreSQL runtime targets, plus schema migration and seed-data tooling. This folder is a standalone repository root for Render or Azure VM production deployment.
+FastAPI backend currently deployed to Azure VMs with SQL Server, plus schema migration and seed-data tooling. Supabase and third-party hosting assets are retained as isolated optional integrations.
 
 ## Azure production deployment
 
@@ -10,13 +10,17 @@ The development and production runners sync this repository, including `db/` mig
 
 The Employee Portal has separate Excel exports for detailed results and a summary workbook. The summary includes overall totals plus domain, product, and domain-by-product breakdowns for all portal records.
 
-## Deploy on Render
+## Isolated optional providers
 
-Create a Render Blueprint from this repository and use `render.yaml`, or create a Docker web service with this folder as the build context and `Dockerfile` as the Dockerfile. The API listens on port `8000`; Render checks `/api/health`.
+The active deployment path is the Azure VM workflow above with SQL Server. Render and Vercel are not currently used; their manifests and adapter are kept outside the repository root so hosting platforms do not discover them automatically:
 
-The API requires an existing, network-accessible database. Select it with `DB_TARGET=MSSQL` or `DB_TARGET=SUPABASE`. For SQL Server, set `MSSQL_TARGET` and its matching settings; Render's blueprint defaults to Azure SQL. For Supabase, configure the project URL and a server-only service-role key for the HTTPS Data API; a PostgreSQL password is not required. Configure `FRONTEND_ORIGIN` with the Vercel production origin, and set the auth passwords and secrets before opening the app to users. Set `FACE_MATCH_SERVICE_URL` and `FACE_MATCH_API_KEY` to the separately deployed Face Match service values. `LOCAL_LLM_URL` is optional; the API uses its fallback behavior when it is unavailable.
+- API Render blueprint: [`deploy/optional/render/render.yaml`](./deploy/optional/render/render.yaml)
+- Vercel manifest and Python adapter: [`deploy/optional/vercel/`](./deploy/optional/vercel/)
+- Face Match Render blueprint: [`../python-ai/deploy/optional/render/render.yaml`](../python-ai/deploy/optional/render/render.yaml)
 
-The blueprint attaches a persistent disk at `/app/uploads` for uploaded documents and recordings. Keep that disk attached when redeploying.
+To re-enable a Render blueprint, copy its manifest to the repository root before connecting the repository. To re-enable Vercel, copy `deploy/optional/vercel/vercel.json` to the repository root and keep its referenced adapter at `deploy/optional/vercel/api/index.py`.
+
+The API defaults to SQL Server. Supabase remains an optional database adapter and is selected only by explicitly setting `DB_TARGET=SUPABASE`; the `db/postgres/` and `db/supabase/` schemas and migration tooling are not part of the active SQL Server migration path. Do not set that target in the active SQL Server deployment.
 
 ## Application logs
 

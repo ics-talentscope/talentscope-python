@@ -66,6 +66,23 @@ def test_roster_crud_and_shortlist(client, store, admin):
     assert client.request("DELETE", "/api/admin/employees", headers=admin, json={"ids": ["NOPE"]}).status_code == 404
 
 
+def test_employee_ids_are_unique_case_insensitively(store):
+    from routers.admin_employees import update_employee
+
+    corp_pool.save_roster(roster("Emp1", "E2"))
+
+    conflict = update_employee({"employeeId": "emp1", "updates": {"employee_id": "e2"}})
+    assert conflict.status_code == 409
+
+    renamed_case = update_employee({"employeeId": "EMP1", "updates": {"employee_id": "EMP1"}})
+    assert renamed_case["success"] is True
+    assert len(corp_pool.load_roster()) == 2
+    assert corp_pool.load_roster()[0]["employee_id"] == "EMP1"
+
+    corp_pool.save_roster(roster("1001.0", "1001"))
+    assert [employee["employee_id"] for employee in corp_pool.load_roster()] == ["1001.0"]
+
+
 def test_csv_export(client, store, admin):
     corp_pool.save_roster(roster("E1"))
     res = client.get("/api/admin/employees?export=true", headers=admin)
@@ -211,6 +228,48 @@ def test_jd_match_via_shared_engine(client, store, admin):
     assert override["score"] == saved["E1"]["score_override"]
     assert client.post("/api/admin/employees/llm-evaluate", headers=admin, json={"jdId": "all", "employeeIds": ["E1"]}).status_code == 400
     assert client.post("/api/admin/employees/llm-evaluate", headers=admin, json={"jdId": jd_id}).status_code == 400
+
+
+def test_jd_match_requires_mandatory_skills_and_verified_experience(store):
+    import shutil
+
+    if not shutil.which("node"):
+        pytest.skip("node not installed")
+    from routers.admin_employees import _apply_jd_match
+
+    jd_id = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee"
+    store.seed("job_descriptions", [{
+        "id": jd_id,
+        "file_name": "Java Developer",
+        "jd_text": "Job Title: Java Developer\nMandatory Skills: Java, Spring Boot, AWS\nMinimum 5 years of professional experience.",
+    }])
+    rows = roster("NoExperience", "MissingAws", "Qualified")
+    rows[0].update(
+        skills="Java, Spring Boot, AWS",
+        designation="Java Developer",
+        score_override=98,
+        score_override_jd_id=jd_id,
+    )
+    rows[1].update(
+        skills="Java, Spring Boot",
+        designation="Java Developer",
+        yearsExperience=8,
+        score_override=97,
+        score_override_jd_id=jd_id,
+    )
+    rows[2].update(
+        skills="Java, Spring Boot, AWS",
+        designation="Java Developer",
+        experience=[{"startDate": "Jan 2018", "endDate": "Jan 2024"}],
+    )
+
+    listed = _apply_jd_match(rows, jd_id)
+    by_id = {employee["employee_id"]: employee for employee in listed}
+    assert by_id["NoExperience"]["score"] < 60
+    assert "not verified" in by_id["NoExperience"]["matchRationale"]
+    assert by_id["MissingAws"]["score"] < 60
+    assert "AWS" in by_id["MissingAws"]["matchRationale"]
+    assert by_id["Qualified"]["score"] >= 60
 
 
 def test_portal_summary_uses_detailed_export_rows():

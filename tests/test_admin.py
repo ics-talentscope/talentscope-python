@@ -85,6 +85,8 @@ def test_reset_clears_candidate_state(client, store, admin):
 def test_invite_records_email_and_uses_app_url(client, store, admin, monkeypatch, tmp_path):
     monkeypatch.setattr("services.storage.UPLOAD_DIR", tmp_path)
     monkeypatch.setenv("NEXT_PUBLIC_APP_URL", "http://localhost:3000")
+    for name in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "SMTP_FROM"):
+        monkeypatch.delenv(name, raising=False)
     seed(store)
     res = client.post(f"/api/admin/resumes/{RID}/invite", headers=admin,
                       json={"interviewConfig": {"interviewType": "both", "sections": {"overlapping": 1}}}).json()
@@ -93,7 +95,7 @@ def test_invite_records_email_and_uses_app_url(client, store, admin, monkeypatch
     assert "http://localhost:3000" in mail["body"] and "vercel.app" not in mail["body"] and "Technical & Behavioral" in mail["subject"]
     assert ">Start Assessment</a>" in mail["body"] and "Temporary password:" in mail["body"]
     password = re.search(r"Temporary password: <strong>([^<]+)</strong>", mail["body"]).group(1)
-    assert len(password) >= 12
+    assert re.fullmatch(r"[A-Za-z0-9]{12}", password)
     assert store.first("candidate_sessions", {"email": "c@x.com"})["password_hash"] != password
     login = client.post("/api/interview/access", json={"email": "c@x.com", "password": password})
     assert login.status_code == 200 and login.json()["resumeId"] == RID
@@ -113,8 +115,54 @@ def test_invite_sends_real_mail_when_smtp_configured(client, store, admin, monke
     seed(store)
     assert client.post(f"/api/admin/resumes/{RID}/invite", headers=admin, json={}).json()["status"] == "sent"
     assert sent == ["c@x.com"]
+    delivered_mail = store.select("simulated_emails")[0]
+    delivered_password = re.search(r"Temporary password: <strong>([^<]+)</strong>", delivered_mail["body"]).group(1)
     monkeypatch.setattr(mailer, "send", lambda *a: (_ for _ in ()).throw(RuntimeError("smtp down")))
-    assert client.post(f"/api/admin/resumes/{RID}/invite", headers=admin, json={}).json()["status"] == "failed_real_fallback_simulated"
+    failed = client.post(f"/api/admin/resumes/{RID}/invite", headers=admin, json={})
+    assert failed.status_code == 503 and failed.json()["status"] == "failed_real_fallback_simulated"
+    assert client.post("/api/interview/access", json={"email": "c@x.com", "password": delivered_password}).status_code == 200
+
+
+def test_reset_candidate_password_requires_sent_invite_and_emails_new_password(client, store, admin, monkeypatch, tmp_path):
+    monkeypatch.setattr("services.storage.UPLOAD_DIR", tmp_path)
+    seed(store)
+    reset_url = f"/api/admin/resumes/{RID}/reset-password"
+    assert client.post(reset_url, headers=admin).status_code == 409
+
+    monkeypatch.setenv("SMTP_USER", "u@x.com")
+    monkeypatch.setenv("SMTP_PASS", "pw")
+    sent = []
+    monkeypatch.setattr(mailer, "send", lambda to, subject, html: sent.append((to, subject, html)))
+    assert client.post(f"/api/admin/resumes/{RID}/invite", headers=admin, json={}).json()["status"] == "sent"
+    previous_mail = store.select("simulated_emails")[0]
+    previous_password = re.search(r"Temporary password: <strong>([^<]+)</strong>", previous_mail["body"]).group(1)
+
+    response = client.post(reset_url, headers=admin)
+    assert response.status_code == 200 and response.json()["status"] == "sent"
+    reset_mail = next(row for row in store.select("simulated_emails") if row["subject"] == "TalentScope — Assessment Password Reset")
+    new_password = re.search(r"Temporary password: <strong>([^<]+)</strong>", reset_mail["body"]).group(1)
+    assert re.fullmatch(r"[A-Za-z0-9]{12}", new_password)
+    assert len(sent) == 2 and sent[-1][0] == "c@x.com"
+    assert client.post("/api/interview/access", json={"email": "c@x.com", "password": previous_password}).status_code == 401
+    assert client.post("/api/interview/access", json={"email": "c@x.com", "password": new_password}).status_code == 200
+
+
+def test_failed_password_reset_email_preserves_existing_password(client, store, admin, monkeypatch):
+    seed(store)
+    previous_password = "OriginalPass123"
+    from services import sessions
+
+    sessions.issue_candidate_password("c@x.com", RID)
+    sessions.save_candidate_password("c@x.com", RID, previous_password)
+    mailer.record("c@x.com", "Cand Idate", "Invitation", "sent invite", "sent", "rm@infinite.com")
+    monkeypatch.setenv("SMTP_USER", "u@x.com")
+    monkeypatch.setenv("SMTP_PASS", "pw")
+    monkeypatch.setattr(mailer, "send", lambda *a: (_ for _ in ()).throw(RuntimeError("smtp down")))
+
+    response = client.post(f"/api/admin/resumes/{RID}/reset-password", headers=admin)
+    assert response.status_code == 503
+    login = client.post("/api/interview/access", json={"email": "c@x.com", "password": previous_password})
+    assert login.status_code == 200
 
 
 def test_portal_settings_sync_and_logs(client, store, admin, monkeypatch, tmp_path):

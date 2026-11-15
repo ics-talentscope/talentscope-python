@@ -604,7 +604,7 @@ def collect_db() -> dict:
     store = get_store()
     if not isinstance(store, MssqlStore):
         return {"collectedAt": collected, "configured": False,
-                "connection": {"ok": False, "error": "SQL Server is not configured (DB_PROVIDER / MSSQL_* env)"}}
+                "connection": {"ok": False, "error": "SQL Server is not configured (DB_TARGET / MSSQL_* env)"}}
     started = time.perf_counter()
     server = section(server_info)
     if not server["ok"]:

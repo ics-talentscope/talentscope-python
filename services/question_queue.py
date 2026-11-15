@@ -11,7 +11,7 @@ import anyio
 
 from core.config import env, env_int
 from core.db import get_store
-from services import llm, question_gen, resumes
+from services import question_gen, resumes
 
 log = logging.getLogger("talentscope")
 
@@ -22,6 +22,9 @@ HEARTBEAT_S = 30
 SWEEP_S = 60
 POLL_S = 1.0
 FALLBACK_SETTLE_S = 6
+MAX_GENERATION_WAIT_S = 300
+CLAIM_PREFIX = "c:"
+CLAIM_STALE_S = 60
 
 
 def _now() -> str:
@@ -148,7 +151,7 @@ def backoff_s(attempt: int) -> float:
 
 
 def start_wait_s() -> float:
-    return float(env_int("QGEN_START_WAIT_S", 20))
+    return float(max(120, env_int("QGEN_START_WAIT_S", 120)))
 
 
 def workers_alive() -> bool:
@@ -178,8 +181,14 @@ def enqueue(resume_id: str, live: bool = False, force: bool = False) -> dict:
         try:
             store.insert("question_sets", {"resume_id": resume_id, "status": "queued", "attempts": 0, "queued_at": _now(), "updated_at": _now()})
         except Exception as err:
+            row = _row(resume_id)
+            if row is None:
+                raise RuntimeError(f"Could not register question generation for {resume_id}") from err
             log.info("question set already registered: %s", err)
-        row = _row(resume_id) or {"resume_id": resume_id, "status": "queued"}
+        else:
+            row = _row(resume_id)
+        if row is None:
+            raise RuntimeError(f"Question generation state missing after registration for {resume_id}")
     elif row["status"] == "failed" or (force and row["status"] != "running"):
         store.update("question_sets", {"status": "queued", "attempts": 0, "last_error": None, "updated_at": _now()}, {"resume_id": resume_id})
         row = {**row, "status": "queued"}
@@ -210,8 +219,12 @@ def load_context(resume_id: str) -> tuple[dict, dict, str]:
     return resume, config, question_gen.jd_text(report.get("jdId"))
 
 
-def _claim_served(resume_id: str, target: str, previous: Optional[str]) -> bool:
-    return bool(get_store().update("question_sets", {"served": target, "updated_at": _now()}, {"resume_id": resume_id, "served": previous}))
+def _claim_served(resume_id: str, previous: Optional[str]) -> Optional[str]:
+    claim = f"{CLAIM_PREFIX}{uuid.uuid4().hex[:14]}"
+    store = get_store()
+    store.update("question_sets", {"served": claim, "updated_at": _now()}, {"resume_id": resume_id, "served": previous})
+    row = _row(resume_id)
+    return claim if row and row.get("served") == claim else None
 
 
 def _write_questions(resume_id: str, items: list[dict]) -> None:
@@ -221,13 +234,19 @@ def _write_questions(resume_id: str, items: list[dict]) -> None:
 
 
 def _commit(resume_id: str, items: list[dict], target: str, previous: Optional[str]) -> bool:
-    if not _claim_served(resume_id, target, previous):
+    claim = _claim_served(resume_id, previous)
+    if not claim:
         return False
     try:
         _write_questions(resume_id, items)
     except Exception:
-        get_store().update("question_sets", {"served": previous}, {"resume_id": resume_id})
+        get_store().update("question_sets", {"served": previous}, {"resume_id": resume_id, "served": claim})
         raise
+    get_store().update(
+        "question_sets",
+        {"status": "ready", "served": target, "updated_at": _now()},
+        {"resume_id": resume_id, "served": claim},
+    )
     return True
 
 
@@ -236,16 +255,27 @@ def serve_ai(resume_id: str, items: list[dict]) -> bool:
 
 
 def serve_fallback(resume_id: str) -> bool:
-    if not _claim_served(resume_id, "fallback", None):
-        return False
-    try:
+    if _row(resume_id) is None:
+        log.warning("question set missing for %s; generating fallback questions directly", resume_id)
         resume, config, jd = load_context(resume_id)
         result = question_gen.build_set(resume, config, jd, False, resume_id)
         _write_questions(resume_id, result["items"])
-        get_store().update("question_sets", {"language": result["language"], "items": result["items"]}, {"resume_id": resume_id, "status": ["queued", "running", "failed"]})
+        return True
+    resume, config, jd = load_context(resume_id)
+    result = question_gen.build_set(resume, config, jd, False, resume_id)
+    claim = _claim_served(resume_id, None)
+    if not claim:
+        return False
+    try:
+        _write_questions(resume_id, result["items"])
+        get_store().update(
+            "question_sets",
+            {"status": "ready", "served": "fallback", "language": result["language"], "items": result["items"], "updated_at": _now()},
+            {"resume_id": resume_id, "served": claim},
+        )
         return True
     except Exception:
-        get_store().update("question_sets", {"served": None}, {"resume_id": resume_id})
+        get_store().update("question_sets", {"served": None}, {"resume_id": resume_id, "served": claim})
         raise
 
 
@@ -259,12 +289,20 @@ def _begin(resume_id: str) -> Optional[list[str]]:
         return questions
     row = _row(resume_id)
     if row and row.get("served"):
+        served = row["served"]
+        if served.startswith(CLAIM_PREFIX):
+            if _age_s(row.get("updated_at")) <= CLAIM_STALE_S:
+                return None
         reset(resume_id)
         row = None
     if row and row["status"] == "failed":
         return _finalize(resume_id)
-    enqueue(resume_id, live=True)
-    if not llm.is_up() or not workers_alive():
+    try:
+        enqueue(resume_id, live=True)
+    except Exception as err:
+        log.error("question queue registration failed for %s; using fallback: %s", resume_id, err)
+        return _finalize(resume_id)
+    if not workers_alive():
         return _finalize(resume_id)
     return None
 
@@ -285,26 +323,41 @@ def ensure_sync(resume_id: str, wait_s: Optional[float] = None) -> list[str]:
     ready = _begin(resume_id)
     if ready is not None:
         return ready
-    deadline = time.monotonic() + (start_wait_s() if wait_s is None else wait_s)
-    while time.monotonic() < deadline:
-        time.sleep(POLL_S)
+    requested_wait = MAX_GENERATION_WAIT_S if wait_s is None else wait_s
+    wait_budget = min(MAX_GENERATION_WAIT_S, max(start_wait_s(), requested_wait))
+    deadline = time.monotonic() + wait_budget
+    while True:
         ready = _poll(resume_id)
         if ready:
             return ready
-    return _finalize(resume_id)
+        row = _row(resume_id)
+        if not row or row.get("status") in ("failed", "ready") or not workers_alive():
+            return _finalize(resume_id)
+        if time.monotonic() >= deadline:
+            log.warning("question generation timed out for %s; using fallback", resume_id)
+            return _finalize(resume_id)
+        time.sleep(POLL_S)
 
 
 async def ensure_async(resume_id: str, wait_s: Optional[float] = None) -> list[str]:
     ready = await anyio.to_thread.run_sync(_begin, resume_id)
     if ready is not None:
         return ready
-    deadline = time.monotonic() + (start_wait_s() if wait_s is None else wait_s)
-    while time.monotonic() < deadline:
-        await anyio.sleep(POLL_S)
+    requested_wait = MAX_GENERATION_WAIT_S if wait_s is None else wait_s
+    wait_budget = min(MAX_GENERATION_WAIT_S, max(start_wait_s(), requested_wait))
+    deadline = time.monotonic() + wait_budget
+    while True:
         ready = await anyio.to_thread.run_sync(_poll, resume_id)
         if ready:
             return ready
-    return await anyio.to_thread.run_sync(_finalize, resume_id)
+        row = await anyio.to_thread.run_sync(_row, resume_id)
+        workers = await anyio.to_thread.run_sync(workers_alive)
+        if not row or row.get("status") in ("failed", "ready") or not workers:
+            return await anyio.to_thread.run_sync(_finalize, resume_id)
+        if time.monotonic() >= deadline:
+            log.warning("question generation timed out for %s; using fallback", resume_id)
+            return await anyio.to_thread.run_sync(_finalize, resume_id)
+        await anyio.sleep(POLL_S)
 
 
 def _retry_or_fail(resume_id: str, attempts: int, err: Exception) -> None:
@@ -336,7 +389,7 @@ def process_question_job(resume_id: str) -> None:
         log.warning("question generation attempt %s failed for %s: %s", attempts, resume_id, err)
         _retry_or_fail(resume_id, attempts, err)
         return
-    get_store().update("question_sets", {"status": "ready", "language": result["language"], "items": result["items"], "last_error": None, "updated_at": _now()},
+    get_store().update("question_sets", {"language": result["language"], "items": result["items"], "last_error": None, "updated_at": _now()},
                        {"resume_id": resume_id, "status": "running"})
     try:
         serve_ai(resume_id, result["items"])

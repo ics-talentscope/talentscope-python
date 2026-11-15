@@ -11,7 +11,7 @@ import anyio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from core.config import env, env_int, frontend_origins, mssql_settings
+from core.config import db_target, env, env_int, frontend_origins, mssql_settings
 from core.errors import install_error_handlers
 from core.logger import configure_logging, logger as structured_logger, run_log_archiver
 from core.request_logging import install_request_logging
@@ -78,7 +78,7 @@ async def lifespan(_app: FastAPI):
 
 
 require_secret_in_production()
-if env("DB_PROVIDER").lower() == "supabase":
+if db_target() == "SUPABASE":
     log.info("database: supabase %s", env("NEXT_PUBLIC_SUPABASE_URL"))
 else:
     _db = mssql_settings()
