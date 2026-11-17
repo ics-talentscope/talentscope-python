@@ -224,18 +224,41 @@ async function adoptLiveIdentities(pool: Pool): Promise<IdentityAdopt> {
           WHERE NOT EXISTS (SELECT 1 FROM dbo.candidate_sessions x WHERE x.id = s.id)
         ) m WHERE rn_live = 1 AND rn_dev = 1;
 
-        IF OBJECT_ID(N'dbo.tests', N'U') IS NOT NULL
-          ALTER TABLE dbo.tests NOCHECK CONSTRAINT FK_tests_employees;
-        IF OBJECT_ID(N'dbo.test_attempts', N'U') IS NOT NULL
+        DECLARE @remap_fks TABLE (
+          schema_name sysname NOT NULL,
+          table_name sysname NOT NULL,
+          constraint_name sysname NOT NULL,
+          PRIMARY KEY (schema_name, table_name, constraint_name)
+        );
+        INSERT INTO @remap_fks (schema_name, table_name, constraint_name)
+        SELECT ps.name, pt.name, fk.name
+        FROM sys.foreign_keys fk
+        JOIN sys.tables pt ON pt.object_id = fk.parent_object_id
+        JOIN sys.schemas ps ON ps.schema_id = pt.schema_id
+        JOIN sys.tables rt ON rt.object_id = fk.referenced_object_id
+        JOIN sys.schemas rs ON rs.schema_id = rt.schema_id
+        WHERE ps.name = N'dbo' AND rs.name = N'dbo'
+          AND (
+            (pt.name = N'tests' AND rt.name = N'employees')
+            OR (pt.name = N'test_questions' AND rt.name = N'tests')
+            OR (pt.name = N'test_attempts' AND rt.name IN (N'employees', N'tests', N'test_questions'))
+            OR (pt.name = N'employee_auth_otps' AND rt.name = N'employees')
+          );
+
+        DECLARE @fk_schema sysname, @fk_table sysname, @fk_name sysname, @fk_sql nvarchar(1000);
+        DECLARE disable_remap_fks CURSOR LOCAL FAST_FORWARD FOR
+          SELECT schema_name, table_name, constraint_name FROM @remap_fks;
+        OPEN disable_remap_fks;
+        FETCH NEXT FROM disable_remap_fks INTO @fk_schema, @fk_table, @fk_name;
+        WHILE @@FETCH_STATUS = 0
         BEGIN
-          ALTER TABLE dbo.test_attempts NOCHECK CONSTRAINT FK_ta_employees;
-          ALTER TABLE dbo.test_attempts NOCHECK CONSTRAINT FK_ta_tests;
-          ALTER TABLE dbo.test_attempts NOCHECK CONSTRAINT FK_ta_questions;
+          SET @fk_sql = N'ALTER TABLE ' + QUOTENAME(@fk_schema) + N'.' + QUOTENAME(@fk_table)
+            + N' NOCHECK CONSTRAINT ' + QUOTENAME(@fk_name) + N';';
+          EXEC sys.sp_executesql @fk_sql;
+          FETCH NEXT FROM disable_remap_fks INTO @fk_schema, @fk_table, @fk_name;
         END;
-        IF OBJECT_ID(N'dbo.test_questions', N'U') IS NOT NULL
-          ALTER TABLE dbo.test_questions NOCHECK CONSTRAINT FK_tq_tests;
-        IF OBJECT_ID(N'dbo.employee_auth_otps', N'U') IS NOT NULL
-          ALTER TABLE dbo.employee_auth_otps NOCHECK CONSTRAINT FK_employee_auth_otps_employee;
+        CLOSE disable_remap_fks;
+        DEALLOCATE disable_remap_fks;
 
         UPDATE t SET t.employee_id = m.live_id
         FROM dbo.tests t JOIN #emp_map m ON t.employee_id = m.dev_id;
@@ -262,18 +285,19 @@ async function adoptLiveIdentities(pool: Pool): Promise<IdentityAdopt> {
         UPDATE s SET s.id = m.live_id
         FROM dbo.candidate_sessions s JOIN #sess_map m ON s.id = m.dev_id;
 
-        IF OBJECT_ID(N'dbo.tests', N'U') IS NOT NULL
-          ALTER TABLE dbo.tests WITH CHECK CHECK CONSTRAINT FK_tests_employees;
-        IF OBJECT_ID(N'dbo.test_questions', N'U') IS NOT NULL
-          ALTER TABLE dbo.test_questions WITH CHECK CHECK CONSTRAINT FK_tq_tests;
-        IF OBJECT_ID(N'dbo.test_attempts', N'U') IS NOT NULL
+        DECLARE enable_remap_fks CURSOR LOCAL FAST_FORWARD FOR
+          SELECT schema_name, table_name, constraint_name FROM @remap_fks;
+        OPEN enable_remap_fks;
+        FETCH NEXT FROM enable_remap_fks INTO @fk_schema, @fk_table, @fk_name;
+        WHILE @@FETCH_STATUS = 0
         BEGIN
-          ALTER TABLE dbo.test_attempts WITH CHECK CHECK CONSTRAINT FK_ta_employees;
-          ALTER TABLE dbo.test_attempts WITH CHECK CHECK CONSTRAINT FK_ta_tests;
-          ALTER TABLE dbo.test_attempts WITH CHECK CHECK CONSTRAINT FK_ta_questions;
+          SET @fk_sql = N'ALTER TABLE ' + QUOTENAME(@fk_schema) + N'.' + QUOTENAME(@fk_table)
+            + N' WITH CHECK CHECK CONSTRAINT ' + QUOTENAME(@fk_name) + N';';
+          EXEC sys.sp_executesql @fk_sql;
+          FETCH NEXT FROM enable_remap_fks INTO @fk_schema, @fk_table, @fk_name;
         END;
-        IF OBJECT_ID(N'dbo.employee_auth_otps', N'U') IS NOT NULL
-          ALTER TABLE dbo.employee_auth_otps WITH CHECK CHECK CONSTRAINT FK_employee_auth_otps_employee;
+        CLOSE enable_remap_fks;
+        DEALLOCATE enable_remap_fks;
 
         DELETE r FROM dbo.__live_sync_rows r
         JOIN #emp_map m ON r.table_name = N'employees'
