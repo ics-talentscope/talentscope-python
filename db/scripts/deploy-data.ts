@@ -2,13 +2,12 @@
  * Make MSSQL table data match mssql/data/<table>.json.
  *
  * All tables are applied in ONE transaction: if any row is invalid, nothing changes.
- * Rows are matched on primary key; new rows are inserted, changed rows updated, identical rows left alone.
- * Rows missing from a file are only deleted when --prune is passed.
+ * Rows are matched on primary key; missing rows are inserted, changed rows updated, identical rows left alone.
+ * Existing rows are never deleted.
  *
  * Usage:
  *   npm run db:deploy-data -- --target=local
  *   npm run db:deploy-data -- --target=remote --dry-run        (apply, report, roll back)
- *   npm run db:deploy-data -- --target=remote --prune
  *   npm run db:deploy-data -- --tables=employees,portal_settings
  */
 import { existsSync, readFileSync } from "fs";
@@ -21,7 +20,6 @@ const argv = process.argv.slice(2);
 applyTargetArg(argv);
 
 const DRY_RUN = argv.includes("--dry-run");
-const PRUNE = argv.includes("--prune");
 
 type ColumnInfo = {
   name: string;
@@ -219,15 +217,6 @@ function keyMatch(pk: string[], a: string, b: string): string {
   return pk.map((c) => `${a}.${quoteIdent(c)} = ${b}.${quoteIdent(c)}`).join(" AND ");
 }
 
-async function prune(tx: sql.Transaction, plan: Plan): Promise<number> {
-  const target = `dbo.${quoteIdent(plan.table.name)}`;
-  const result = await new sql.Request(tx).query(`
-DELETE t FROM ${target} AS t
-WHERE NOT EXISTS (SELECT 1 FROM ${plan.stage} AS s WHERE ${keyMatch(plan.table.pk, "s", "t")});
-SELECT @@ROWCOUNT AS deleted;`);
-  return Number(result.recordset[0]?.deleted || 0);
-}
-
 async function merge(tx: sql.Transaction, plan: Plan): Promise<{ inserted: number; updated: number }> {
   if (!plan.rows.length) return { inserted: 0, updated: 0 };
   const target = `dbo.${quoteIdent(plan.table.name)}`;
@@ -258,6 +247,9 @@ FROM @actions;`);
 }
 
 async function main() {
+  if (argv.includes("--prune")) {
+    throw new Error("--prune is not supported; data deployment never deletes existing rows.");
+  }
   const target = resolveMssqlTarget();
   const tableFilter = argValue(argv, "tables");
   const requestedTables = selectTables(tableFilter);
@@ -281,7 +273,7 @@ async function main() {
     const schema = await loadSchema(pool);
     const plans = tables.map((t) => buildPlan(t, schema));
     console.log(
-      `Deploying data to ${target}${DRY_RUN ? " (dry run, will roll back)" : ""}${PRUNE ? " with prune" : ""}: ` +
+      `Deploying data to ${target}${DRY_RUN ? " (dry run, will roll back)" : ""}: ` +
         `${plans.length} table(s), ${plans.reduce((n, p) => n + p.rows.length, 0)} row(s)`
     );
 
@@ -290,18 +282,11 @@ async function main() {
     try {
       for (const plan of plans) await stage(tx, plan);
 
-      const deleted = new Map<string, number>();
-      if (PRUNE) {
-        for (const plan of [...plans].reverse()) deleted.set(plan.table.name, await prune(tx, plan));
-      }
-
       let changes = 0;
       for (const plan of plans) {
         const { inserted, updated } = await merge(tx, plan);
-        const del = deleted.get(plan.table.name) || 0;
-        changes += inserted + updated + del;
+        changes += inserted + updated;
         const parts = [`+${inserted} inserted`, `~${updated} updated`];
-        if (PRUNE) parts.push(`-${del} deleted`);
         console.log(`  ${plan.table.name.padEnd(26)} ${String(plan.rows.length).padStart(6)} rows | ${parts.join(", ")}`);
       }
 

@@ -47,6 +47,18 @@ function splitBatches(sqlText: string): string[] {
   return batches;
 }
 
+function assertDataPreservingMigration(migration: Migration): void {
+  const withoutComments = migration.text
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*--.*$/gm, "");
+  const destructive = /\b(?:DELETE\s+FROM|DELETE\s+[A-Z_][\w$#]*\s+FROM|TRUNCATE(?:\s+TABLE)?|DROP\s+(?:TABLE|COLUMN|DATABASE|SCHEMA))\b/i;
+  if (destructive.test(withoutComments)) {
+    throw new Error(
+      `Migration ${migration.file} contains data-destructive SQL; preserve existing rows and use additive or conditional changes.`
+    );
+  }
+}
+
 async function ensureMigrationsTable(pool: sql.ConnectionPool): Promise<void> {
   await pool.request().batch(`
 IF OBJECT_ID(N'dbo.__migrations', N'U') IS NULL
@@ -124,6 +136,7 @@ async function main() {
       console.log(`No pending migrations on ${target}.`);
       return;
     }
+    pending.forEach(assertDataPreservingMigration);
 
     console.log(`Applying ${pending.length} migration(s) to ${target}...`);
     for (const m of pending) {

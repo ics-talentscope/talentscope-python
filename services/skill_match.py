@@ -36,7 +36,8 @@ def _run(jd_text: str, people: list[dict]) -> list[dict]:
 
 def person_input(emp: dict) -> dict:
     return {"skills": emp.get("skills"), "designation": emp.get("designation"), "grade": emp.get("grade"),
-            "product": emp.get("product"), "role": emp.get("role")}
+            "product": emp.get("product"), "role": emp.get("role"), "experience": emp.get("experience"),
+            "yearsExperience": emp.get("yearsExperience", emp.get("years_experience"))}
 
 
 def score_people(jd_text: str, people: list[dict]) -> list[dict]:

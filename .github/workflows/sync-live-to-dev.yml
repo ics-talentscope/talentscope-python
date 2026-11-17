@@ -1,0 +1,37 @@
+name: Sync Live DB into Development
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Copy TalentScope_DB_Live into the development database
+    runs-on: [self-hosted, linux, icsbetintapp01]
+    environment: development
+    timeout-minutes: 60
+    concurrency:
+      group: talentscope-dev-live-sync
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: develop
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: db/package-lock.json
+      - name: Copy Live rows into Development
+        run: |
+          set -euo pipefail
+          ENV_FILE="${ENV_FILE:-/opt/talentscope-dev/.env.local}"
+          [[ -f "$ENV_FILE" ]] || { echo "Missing development environment file: $ENV_FILE" >&2; exit 1; }
+          cp "$ENV_FILE" .env.local
+          cd db
+          npm ci
+          npx tsx scripts/sync-live-to-dev.ts

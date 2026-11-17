@@ -18,8 +18,14 @@ def build_portal_invite_html(
     pwd = escape(temporary_password or employee_id or "")
     url = escape((portal_url or "https://talentscope.infinite.com/").rstrip("/") + "/", quote=True)
     url_text = escape((portal_url or "https://talentscope.infinite.com/").rstrip("/") + "/")
-    due = escape(deadline or os.environ.get("PRODUCT_ASSESSMENT_DEADLINE") or "19th Oct 26")
+    raw_due = (deadline or os.environ.get("PRODUCT_ASSESSMENT_DEADLINE") or "").strip()
+    due = escape(raw_due) if raw_due else ""
     hint = escape(product_hint or "for example, HLR-HSS")
+    due_line = (
+        f'<p style="margin-top:20px;"><strong>Please complete your assigned Product Assessment by {due}.</strong></p>'
+        if due
+        else '<p style="margin-top:20px;"><strong>Please complete your assigned Product Assessment promptly.</strong></p>'
+    )
 
     def rule(rule: str, req: str) -> str:
         return (
@@ -106,7 +112,7 @@ def build_portal_invite_html(
   <p style="font-size:13px;color:#475569;"><strong>Support Team person:</strong> Kavan Anselm<br/>
   <strong>Email:</strong> <a href="mailto:Kavan.Anselm2@infinite.com" style="color:#4f46e5;">Kavan.Anselm2@infinite.com</a></p>
   <p style="font-size:13px;color:#475569;">When contacting support, include Employee ID, browser, and a screenshot if available.</p>
-  <p style="margin-top:20px;"><strong>Please complete your assigned Product Assessment by {due}.</strong></p>
+  {due_line}
   <p>Thank you for your cooperation.</p>
   <p style="margin-top:20px;">Regards,<br/><strong>TalentScope Team</strong></p>
   <p style="color:#9ca3af;font-size:11px;margin-top:28px;border-top:1px solid #f3f4f6;padding-top:14px;text-align:center;">This is an automated email from TalentScope · Infinite</p>

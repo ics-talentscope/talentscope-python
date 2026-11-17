@@ -3,6 +3,10 @@ __pycache__
 .venv
 venv
 uploads
+recordings
+python/logs
+logs
+python/logs
 *.pyc
 .git
 node_modules

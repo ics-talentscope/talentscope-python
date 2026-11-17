@@ -1,4 +1,5 @@
 import base64
+from html import escape
 import logging
 import re
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ from core.security import get_client_ip, inspect_upload, is_rate_limited_any, ra
 from core.tokens import sign_interview_token, verify_interview_token
 from core.validation import as_email, as_uuid
 from services.structured_log import write_log
-from services import ai, audit, identity, interviews, llm, question_queue, resumes, sessions, storage
+from services import ai, audit, identity, interviews, llm, mailer, question_queue, resumes, sessions, storage
 
 log = logging.getLogger("talentscope")
 router = APIRouter(prefix="/api/interview", tags=["interview"])
@@ -49,31 +50,79 @@ def _require_interview_access(request: Request, interview_id: str) -> str:
     raise ApiError(401, "Interview session required")
 
 
-@router.post("/access")
-def access(request: Request, body: dict = Body(default_factory=dict)):
+@router.post("/access/request-code")
+def request_access_code(request: Request, body: dict = Body(default_factory=dict)):
     ip = get_client_ip(request)
-    ip_limit = is_rate_limited_any([f"public:ip:{ip}"], 30, 60_000)
+    ip_limit = is_rate_limited_any([f"interview:code:ip:{ip}"], 3, 10 * 60_000)
     if ip_limit.limited:
         return rate_limited_response(ip_limit, "Too many attempts. Please try again later.")
     try:
         email = as_email(body.get("email"))
         if not email:
             return JSONResponse({"success": False, "message": "Email address is required"}, status_code=400)
-        account_limit = is_rate_limited_any([f"public:acct:{email}"], 15, 60_000)
+        account_limit = is_rate_limited_any([f"interview:code:acct:{email}"], 3, 10 * 60_000)
         if account_limit.limited:
             return rate_limited_response(account_limit, "Too many attempts. Please try again later.")
         session = sessions.get_session_by_email(email)
-        if not session:
-            return JSONResponse({"success": False, "message": "This email is not registered for an interview session. Please contact HR or ensure it matches the email on your CV."}, status_code=404)
-        if session["used"]:
-            return JSONResponse({"success": False, "message": "You have already completed this interview. Duplicate participation or re-entry is not permitted."}, status_code=403)
-        if session["resumeId"] and not resumes.get_resume(session["resumeId"]):
-            return JSONResponse({"success": False, "message": "Associated resume record was not found. Please contact HR."}, status_code=404)
-        resume_id = session["resumeId"]
-        return {"success": True, "resumeId": resume_id, "interviewToken": sign_interview_token(resume_id)}
+        challenge = sessions.issue_access_code(email) if session else None
+        if not challenge:
+            return {"success": True, "message": "If this email is eligible, a verification code will be sent."}
+        code, challenge_value = challenge
+        if not resumes.get_resume(session["resumeId"]):
+            sessions.clear_access_code(email, challenge_value)
+            return {"success": True, "message": "If this email is eligible, a verification code will be sent."}
+        html = (
+            "<p>Your TalentScope interview verification code is:</p>"
+            f"<p style=\"font-size:24px;font-weight:bold;letter-spacing:5px\">{escape(code)}</p>"
+            f"<p>This code expires in {sessions.ACCESS_CODE_TTL_SECONDS // 60} minutes and can be used once.</p>"
+            "<p>If you did not request this code, you can ignore this email.</p>"
+        )
+        status, send_error = mailer.dispatch(email, "TalentScope interview verification code", html)
+        if status != "sent":
+            sessions.clear_access_code(email, challenge_value)
+            log.error("Interview verification email failed for %s: %s", email, send_error or status)
+            return json_error(503, "Unable to send a verification code. Please contact HR.")
+        return {"success": True, "message": "If this email is eligible, a verification code will be sent."}
     except Exception as err:
-        log.error("interview/access: %s", err)
-        return JSONResponse({"success": False, "message": "Verification failed"}, status_code=500)
+        log.error("interview/access/request-code: %s", err)
+        return public_error(err, "Unable to send a verification code")
+
+
+@router.post("/access")
+def access(request: Request, body: dict = Body(default_factory=dict)):
+    ip = get_client_ip(request)
+    ip_limit = is_rate_limited_any([f"interview:verify:ip:{ip}"], 10, 10 * 60_000)
+    if ip_limit.limited:
+        return rate_limited_response(ip_limit, "Too many attempts. Please try again later.")
+    email = as_email(body.get("email"))
+    code = body.get("code")
+    password = body.get("password")
+    if not email:
+        return json_error(400, "Enter the email address used for your assessment invitation.")
+    if password is None and (not isinstance(code, str) or not re.fullmatch(r"\d{6}", code)):
+        return json_error(400, "Enter the temporary password from your invitation email.")
+    if password is not None and (not isinstance(password, str) or not password or len(password) > 256):
+        return json_error(400, "Enter the temporary password from your invitation email.")
+    account_limit = is_rate_limited_any([f"interview:verify:acct:{email}"], 5, 10 * 60_000)
+    if account_limit.limited:
+        return rate_limited_response(account_limit, "Too many sign-in attempts. Wait a few minutes before trying again.")
+    try:
+        session = (
+            sessions.verify_candidate_password(email, password)
+            if password is not None
+            else sessions.verify_access_code(email, code)
+        )
+    except Exception as err:
+        log.error("Candidate sign-in could not verify stored credentials for %s: %s", email, err)
+        return public_error(err, "Candidate sign-in could not be completed. Please contact HR.", http_status=500)
+    if not session:
+        if password is not None:
+            return json_error(401, "Sign-in failed. Check your email and temporary password, or ask HR to resend the invitation.")
+        return json_error(401, "The verification code is invalid or expired. Request a new code and try again.")
+    resume_id = session["resumeId"]
+    if not resumes.get_resume(resume_id):
+        return json_error(404, "Associated resume record was not found. Please contact HR.")
+    return {"success": True, "resumeId": resume_id, "interviewToken": sign_interview_token(resume_id)}
 
 
 @router.get("/{interview_id}/questions")

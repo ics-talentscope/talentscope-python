@@ -8,7 +8,7 @@ from core.auth import employee_id_from_request, require_employee
 from core.db import get_store
 from core.errors import json_error, public_error
 from core.validation import as_path_id
-from services import accounts, audit, employee_tests as et, question_bank, storage, test_backup, test_video
+from services import accounts, employee_tests as et, storage, test_backup, test_video
 from services.products import format_topic_title_for_display
 from services.structured_log import write_log
 
@@ -36,6 +36,23 @@ def _owned(test_id: str, employee: dict):
 def _mark_video_ready(test: dict, url: str) -> None:
     proctoring = et.mark_video_uploaded(et.normalize_proctoring(test.get("proctoring")))
     get_store().update("tests", {"session_recording_url": url, "proctoring": proctoring}, {"id": test["id"]})
+
+
+def _employee_questions(test: dict) -> tuple[list[dict], list[dict]]:
+    questions = et.questions_for(test["id"])
+    if test.get("status") != "completed":
+        return [
+            {key: value for key, value in question.items() if key not in ("correct_option_index", "explanation")}
+            for question in questions
+        ], []
+
+    attempts = get_store().select(
+        "test_attempts",
+        {"test_id": test["id"]},
+        ["id", "question_id", "selected_option_index", "is_correct", "time_taken_seconds", "created_at"],
+    )
+    attempted_ids = {str(attempt["question_id"]) for attempt in attempts}
+    return [question for question in questions if str(question["id"]) in attempted_ids], attempts
 
 
 @router.get("")
@@ -69,13 +86,9 @@ def get_test(test_id: str, employee: dict = Depends(require_employee)):
         if (accounts.is_assessment_only_employee(employee) and topic != accounts.PRODUCT_ASSESSMENT_TOPIC_ID
                 and not accounts.is_product_assessment_history_topic(topic)):
             return json_error(403, "Forbidden")
-        questions = et.questions_for(test["id"])
+        questions, attempts = _employee_questions(test)
         if not questions and test.get("status") != "completed":
             return json_error(400, "This assessment has no questions assigned yet. Please contact your administrator.")
-        attempts = []
-        if test.get("status") == "completed":
-            attempts = get_store().select("test_attempts", {"test_id": test["id"]},
-                                          ["id", "question_id", "selected_option_index", "is_correct", "time_taken_seconds", "created_at"])
         write_log("employee", "EMPLOYEE_TEST_OPENED", "success", f"{employee['employee_id']} opened test {test['id']} ({test.get('topic_title') or topic})")
         return {"test": _title(test), "questions": questions, "attempts": attempts, "has_recording": test_video.exists(test["id"])}
     except Exception as err:
@@ -105,26 +118,10 @@ def patch_test(test_id: str, body: dict = Body(default_factory=dict), employee: 
 
 @router.delete("/{test_id}")
 def reset_test(test_id: str, employee: dict = Depends(require_employee)):
-    test = _owned(test_id, employee)
-    if not test:
-        return json_error(404, "Not found")
-    try:
-        topic = test.get("topic_id")
-        if accounts.is_product_assessment_history_topic(topic):
-            return json_error(403, "Previous attempts are kept for review and cannot be overwritten.")
-        if topic == accounts.PRODUCT_ASSESSMENT_TOPIC_ID:
-            et.reset_test(test["id"])
-            audit.add_log(employee["email"], "RESET_EMPLOYEE_TEST", "Employee Portal",
-                          f"Archived previous attempt and reset product assessment {test['id']} for employee {employee['employee_id']}", "")
-            return {"success": True, "archived": True}
-        test_video.delete(test["id"])
-        et.regenerate_questions(test)
-        audit.add_log(employee["email"], "RESET_EMPLOYEE_TEST", "Employee Portal",
-                      f"Reset employee learning test {test['id']} for employee {employee['employee_id']}", "")
-        return {"success": True}
-    except Exception as err:
-        audit.add_log(employee["email"], "RESET_EMPLOYEE_TEST_FAILED", "Employee Portal", f"Failed to reset test {test_id}", "")
-        return public_error(err, "Internal error")
+    # Retakes are admin-controlled only. An employee cannot reset their own assessment:
+    # self-service resets skipped the fresh-session setup (fullscreen, camera, proctoring).
+    # Keep the route so stale clients get a clear message instead of a generic 405.
+    return json_error(403, "Employees cannot reset their own assessment. Contact your administrator to reset it for a retake.")
 
 
 @router.post("/{test_id}/start")
@@ -133,7 +130,9 @@ def start_test(test_id: str, employee: dict = Depends(require_employee)):
         test = _owned(test_id, employee)
         if not test:
             return json_error(404, "Test not found")
-        questions = et.questions_for(test["id"])
+        if test.get("status") == "completed":
+            return json_error(409, "Test already submitted.")
+        questions, _ = _employee_questions(test)
         if not questions:
             return json_error(400, "Test has no questions")
         return {"test": test, "questions": questions, "total": len(questions)}
@@ -159,17 +158,22 @@ def submit_test(test_id: str, body: dict = Body(default_factory=dict), employee:
             accuracy = test.get("score_percent")
             if accuracy is None:
                 accuracy = round(correct / total * 100) if total else 0
+            review_questions, review_attempts = _employee_questions(test)
             return {"success": True, "alreadyCompleted": True, "testId": test["id"], "total": total, "correct": correct,
-                    "accuracy": accuracy, "ai_analysis": test.get("ai_analysis")}
+                    "accuracy": accuracy, "ai_analysis": test.get("ai_analysis"),
+                    "questions": review_questions, "attempts": review_attempts}
         ok, error, code = et.can_submit(test)
         if not auto and not ok and code == "NOT_STARTED":
             return json_error(400, error)
         result = et.finalize(test, accounts.employee_uuid(employee["employee_id"]), answers, auto)
         test_backup.snapshot(test["id"], "submit")
+        completed_test = get_store().first("tests", {"id": test["id"]})
+        review_questions, review_attempts = _employee_questions(completed_test)
         correct, total, accuracy = result["correct"], result["total"], result["accuracy"]
         write_log("employee", "EMPLOYEE_TEST_SUBMITTED", "success",
                   f"{employee['employee_id']} submitted test {test['id']}: {correct}/{total} ({accuracy}%){' [auto-submitted]' if auto else ''}")
-        return {"success": True, "testId": test["id"], "total": total, "correct": correct, "accuracy": accuracy, "ai_analysis": None}
+        return {"success": True, "testId": test["id"], "total": total, "correct": correct, "accuracy": accuracy,
+                "ai_analysis": None, "questions": review_questions, "attempts": review_attempts}
     except Exception as err:
         return public_error(err, "Internal error")
 

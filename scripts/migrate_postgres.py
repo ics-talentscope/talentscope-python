@@ -4,6 +4,7 @@ import hashlib
 from pathlib import Path
 
 from core.config import active_profile, postgres_settings
+from core.migration_safety import assert_data_preserving_migration
 
 MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "db" / "postgres" / "migrations"
 
@@ -69,6 +70,7 @@ def main() -> None:
                     print(f"[done] {path.name}")
                     continue
 
+                assert_data_preserving_migration(path.name, sql)
                 try:
                     cursor.execute(sql)
                     cursor.execute(

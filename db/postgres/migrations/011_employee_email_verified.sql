@@ -1,0 +1,5 @@
+ALTER TABLE public.employees
+  ADD COLUMN IF NOT EXISTS email_verified BOOLEAN NOT NULL DEFAULT FALSE;
+
+ALTER TABLE public.employee_auth_otps
+  ADD COLUMN IF NOT EXISTS email VARCHAR(254);

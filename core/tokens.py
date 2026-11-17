@@ -89,3 +89,8 @@ def require_secret_in_production() -> None:
 
 def random_hex(nbytes: int = 16) -> str:
     return os.urandom(nbytes).hex()
+
+
+def otp_digest(code: str, challenge_id: str, purpose: str) -> str:
+    payload = f"{challenge_id}:{purpose}:{code}".encode("utf-8")
+    return hmac.new(_secret(), payload, hashlib.sha256).hexdigest()

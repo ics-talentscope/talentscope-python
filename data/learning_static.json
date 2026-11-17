@@ -1,1 +1,1315 @@
-{"subjects":[{"id":"ai","title":"Artificial Intelligence","description":"Neural networks, expert systems, and foundational AI theory","icon":"Brain","color":"#3b82f6"},{"id":"ml","title":"Machine Learning","description":"Supervised, unsupervised, and reinforcement learning algorithms","icon":"Activity","color":"#8b5cf6"},{"id":"ds","title":"Data Science","description":"Statistics, EDA, and end-to-end data pipelines","icon":"BarChart3","color":"#10b981"},{"id":"dl","title":"Deep Learning","description":"CNNs, RNNs, transformers, and advanced neural architectures","icon":"Layers","color":"#6366f1"},{"id":"nlp","title":"Natural Language Processing","description":"Text mining, sentiment analysis, and LLM engineering","icon":"MessageSquare","color":"#0ea5e9"},{"id":"cv","title":"Computer Vision","description":"Image classification, object detection, and segmentation models","icon":"Eye","color":"#a855f7"},{"id":"genai","title":"Generative AI","description":"GANs, VAEs, diffusion models, and LLM fine-tuning","icon":"Sparkles","color":"#ec4899"},{"id":"python","title":"Python Programming","description":"Core language features, OOP, async, and standard library","icon":"Code","color":"#06b6d4"},{"id":"sql","title":"SQL & Databases","description":"Query design, indexing, transactions, and optimization","icon":"Database","color":"#14b8a6"},{"id":"cloud","title":"Cloud Computing","description":"AWS/GCP/Azure fundamentals, IaaS/PaaS/SaaS, cost management","icon":"Cloud","color":"#f59e0b"},{"id":"mlops","title":"MLOps","description":"CI/CD for ML, model serving, monitoring, and drift detection","icon":"Zap","color":"#ef4444"},{"id":"data-eng","title":"Data Engineering","description":"Pipelines, ETL/ELT, orchestration with Airflow / dbt, lakehouse","icon":"Workflow","color":"#64748b"},{"id":"llm","title":"Large Language Models","description":"Prompt engineering, fine-tuning, RAG, function calling, evaluation","icon":"Bot","color":"#7c3aed"},{"id":"ai-ethics","title":"AI Ethics & Governance","description":"Bias mitigation, responsible AI, EU AI Act, model auditing","icon":"Shield","color":"#475569"}],"catalog":[{"id":"ai","title":"Artificial Intelligence","description":"Neural networks, expert systems, and foundational AI theory","icon":"Brain","color":"#3b82f6","is_active":true,"modules":[{"id":"ai-core","subject_id":"ai","title":"Core Concepts","description":"Neural networks, expert systems, and foundational AI theory","order_index":1,"topics":[{"id":"ai-fundamentals","module_id":"ai-core","title":"Artificial Intelligence Fundamentals","difficulty":"beginner","order_index":1,"estimated_minutes":25},{"id":"ai-intermediate","module_id":"ai-core","title":"Artificial Intelligence Intermediate","difficulty":"intermediate","order_index":2,"estimated_minutes":30},{"id":"ai-advanced","module_id":"ai-core","title":"Artificial Intelligence Advanced","difficulty":"advanced","order_index":3,"estimated_minutes":35}]}]},{"id":"ml","title":"Machine Learning","description":"Supervised, unsupervised, and reinforcement learning algorithms","icon":"Activity","color":"#8b5cf6","is_active":true,"modules":[{"id":"ml-core","subject_id":"ml","title":"Core Concepts","description":"Supervised, unsupervised, and reinforcement learning algorithms","order_index":1,"topics":[{"id":"ml-fundamentals","module_id":"ml-core","title":"Machine Learning Fundamentals","difficulty":"beginner","order_index":1,"estimated_minutes":25},{"id":"ml-intermediate","module_id":"ml-core","title":"Machine Learning Intermediate","difficulty":"intermediate","order_index":2,"estimated_minutes":30},{"id":"ml-advanced","module_id":"ml-core","title":"Machine Learning Advanced","difficulty":"advanced","order_index":3,"estimated_minutes":35}]}]},{"id":"ds","title":"Data Science","description":"Statistics, EDA, and end-to-end data pipelines","icon":"BarChart3","color":"#10b981","is_active":true,"modules":[{"id":"ds-core","subject_id":"ds","title":"Core Concepts","description":"Statistics, EDA, and end-to-end data pipelines","order_index":1,"topics":[{"id":"ds-fundamentals","module_id":"ds-core","title":"Data Science Fundamentals","difficulty":"beginner","order_index":1,"estimated_minutes":25},{"id":"ds-intermediate","module_id":"ds-core","title":"Data Science Intermediate","difficulty":"intermediate","order_index":2,"estimated_minutes":30},{"id":"ds-advanced","module_id":"ds-core","title":"Data Science Advanced","difficulty":"advanced","order_index":3,"estimated_minutes":35}]}]},{"id":"dl","title":"Deep Learning","description":"CNNs, RNNs, transformers, and advanced neural architectures","icon":"Layers","color":"#6366f1","is_active":true,"modules":[{"id":"dl-core","subject_id":"dl","title":"Core Concepts","description":"CNNs, RNNs, transformers, and advanced neural architectures","order_index":1,"topics":[{"id":"dl-fundamentals","module_id":"dl-core","title":"Deep Learning Fundamentals","difficulty":"beginner","order_index":1,"estimated_minutes":25},{"id":"dl-intermediate","module_id":"dl-core","title":"Deep Learning Intermediate","difficulty":"intermediate","order_index":2,"estimated_minutes":30},{"id":"dl-advanced","module_id":"dl-core","title":"Deep Learning Advanced","difficulty":"advanced","order_index":3,"estimated_minutes":35}]}]},{"id":"nlp","title":"Natural Language Processing","description":"Text mining, sentiment analysis, and LLM engineering","icon":"MessageSquare","color":"#0ea5e9","is_active":true,"modules":[{"id":"nlp-core","subject_id":"nlp","title":"Core Concepts","description":"Text mining, sentiment analysis, and LLM engineering","order_index":1,"topics":[{"id":"nlp-fundamentals","module_id":"nlp-core","title":"Natural Language Processing Fundamentals","difficulty":"beginner","order_index":1,"estimated_minutes":25},{"id":"nlp-intermediate","module_id":"nlp-core","title":"Natural Language Processing Intermediate","difficulty":"intermediate","order_index":2,"estimated_minutes":30},{"id":"nlp-advanced","module_id":"nlp-core","title":"Natural Language Processing Advanced","difficulty":"advanced","order_index":3,"estimated_minutes":35}]}]},{"id":"cv","title":"Computer Vision","description":"Image classification, object detection, and segmentation models","icon":"Eye","color":"#a855f7","is_active":true,"modules":[{"id":"cv-core","subject_id":"cv","title":"Core Concepts","description":"Image classification, object detection, and segmentation models","order_index":1,"topics":[{"id":"cv-fundamentals","module_id":"cv-core","title":"Computer Vision Fundamentals","difficulty":"beginner","order_index":1,"estimated_minutes":25},{"id":"cv-intermediate","module_id":"cv-core","title":"Computer Vision Intermediate","difficulty":"intermediate","order_index":2,"estimated_minutes":30},{"id":"cv-advanced","module_id":"cv-core","title":"Computer Vision Advanced","difficulty":"advanced","order_index":3,"estimated_minutes":35}]}]},{"id":"genai","title":"Generative AI","description":"GANs, VAEs, diffusion models, and LLM fine-tuning","icon":"Sparkles","color":"#ec4899","is_active":true,"modules":[{"id":"genai-core","subject_id":"genai","title":"Core Concepts","description":"GANs, VAEs, diffusion models, and LLM fine-tuning","order_index":1,"topics":[{"id":"genai-fundamentals","module_id":"genai-core","title":"Generative AI Fundamentals","difficulty":"beginner","order_index":1,"estimated_minutes":25},{"id":"genai-intermediate","module_id":"genai-core","title":"Generative AI Intermediate","difficulty":"intermediate","order_index":2,"estimated_minutes":30},{"id":"genai-advanced","module_id":"genai-core","title":"Generative AI Advanced","difficulty":"advanced","order_index":3,"estimated_minutes":35}]}]},{"id":"python","title":"Python Programming","description":"Core language features, OOP, async, and standard library","icon":"Code","color":"#06b6d4","is_active":true,"modules":[{"id":"python-core","subject_id":"python","title":"Core Concepts","description":"Core language features, OOP, async, and standard library","order_index":1,"topics":[{"id":"python-fundamentals","module_id":"python-core","title":"Python Programming Fundamentals","difficulty":"beginner","order_index":1,"estimated_minutes":25},{"id":"python-intermediate","module_id":"python-core","title":"Python Programming Intermediate","difficulty":"intermediate","order_index":2,"estimated_minutes":30},{"id":"python-advanced","module_id":"python-core","title":"Python Programming Advanced","difficulty":"advanced","order_index":3,"estimated_minutes":35}]}]},{"id":"sql","title":"SQL & Databases","description":"Query design, indexing, transactions, and optimization","icon":"Database","color":"#14b8a6","is_active":true,"modules":[{"id":"sql-core","subject_id":"sql","title":"Core Concepts","description":"Query design, indexing, transactions, and optimization","order_index":1,"topics":[{"id":"sql-fundamentals","module_id":"sql-core","title":"SQL & Databases Fundamentals","difficulty":"beginner","order_index":1,"estimated_minutes":25},{"id":"sql-intermediate","module_id":"sql-core","title":"SQL & Databases Intermediate","difficulty":"intermediate","order_index":2,"estimated_minutes":30},{"id":"sql-advanced","module_id":"sql-core","title":"SQL & Databases Advanced","difficulty":"advanced","order_index":3,"estimated_minutes":35}]}]},{"id":"cloud","title":"Cloud Computing","description":"AWS/GCP/Azure fundamentals, IaaS/PaaS/SaaS, cost management","icon":"Cloud","color":"#f59e0b","is_active":true,"modules":[{"id":"cloud-core","subject_id":"cloud","title":"Core Concepts","description":"AWS/GCP/Azure fundamentals, IaaS/PaaS/SaaS, cost management","order_index":1,"topics":[{"id":"cloud-fundamentals","module_id":"cloud-core","title":"Cloud Computing Fundamentals","difficulty":"beginner","order_index":1,"estimated_minutes":25},{"id":"cloud-intermediate","module_id":"cloud-core","title":"Cloud Computing Intermediate","difficulty":"intermediate","order_index":2,"estimated_minutes":30},{"id":"cloud-advanced","module_id":"cloud-core","title":"Cloud Computing Advanced","difficulty":"advanced","order_index":3,"estimated_minutes":35}]}]},{"id":"mlops","title":"MLOps","description":"CI/CD for ML, model serving, monitoring, and drift detection","icon":"Zap","color":"#ef4444","is_active":true,"modules":[{"id":"mlops-core","subject_id":"mlops","title":"Core Concepts","description":"CI/CD for ML, model serving, monitoring, and drift detection","order_index":1,"topics":[{"id":"mlops-fundamentals","module_id":"mlops-core","title":"MLOps Fundamentals","difficulty":"beginner","order_index":1,"estimated_minutes":25},{"id":"mlops-intermediate","module_id":"mlops-core","title":"MLOps Intermediate","difficulty":"intermediate","order_index":2,"estimated_minutes":30},{"id":"mlops-advanced","module_id":"mlops-core","title":"MLOps Advanced","difficulty":"advanced","order_index":3,"estimated_minutes":35}]}]},{"id":"data-eng","title":"Data Engineering","description":"Pipelines, ETL/ELT, orchestration with Airflow / dbt, lakehouse","icon":"Workflow","color":"#64748b","is_active":true,"modules":[{"id":"data-eng-core","subject_id":"data-eng","title":"Core Concepts","description":"Pipelines, ETL/ELT, orchestration with Airflow / dbt, lakehouse","order_index":1,"topics":[{"id":"data-eng-fundamentals","module_id":"data-eng-core","title":"Data Engineering Fundamentals","difficulty":"beginner","order_index":1,"estimated_minutes":25},{"id":"data-eng-intermediate","module_id":"data-eng-core","title":"Data Engineering Intermediate","difficulty":"intermediate","order_index":2,"estimated_minutes":30},{"id":"data-eng-advanced","module_id":"data-eng-core","title":"Data Engineering Advanced","difficulty":"advanced","order_index":3,"estimated_minutes":35}]}]},{"id":"llm","title":"Large Language Models","description":"Prompt engineering, fine-tuning, RAG, function calling, evaluation","icon":"Bot","color":"#7c3aed","is_active":true,"modules":[{"id":"llm-core","subject_id":"llm","title":"Core Concepts","description":"Prompt engineering, fine-tuning, RAG, function calling, evaluation","order_index":1,"topics":[{"id":"llm-fundamentals","module_id":"llm-core","title":"Large Language Models Fundamentals","difficulty":"beginner","order_index":1,"estimated_minutes":25},{"id":"llm-intermediate","module_id":"llm-core","title":"Large Language Models Intermediate","difficulty":"intermediate","order_index":2,"estimated_minutes":30},{"id":"llm-advanced","module_id":"llm-core","title":"Large Language Models Advanced","difficulty":"advanced","order_index":3,"estimated_minutes":35}]}]},{"id":"ai-ethics","title":"AI Ethics & Governance","description":"Bias mitigation, responsible AI, EU AI Act, model auditing","icon":"Shield","color":"#475569","is_active":true,"modules":[{"id":"ai-ethics-core","subject_id":"ai-ethics","title":"Core Concepts","description":"Bias mitigation, responsible AI, EU AI Act, model auditing","order_index":1,"topics":[{"id":"ai-ethics-fundamentals","module_id":"ai-ethics-core","title":"AI Ethics & Governance Fundamentals","difficulty":"beginner","order_index":1,"estimated_minutes":25},{"id":"ai-ethics-intermediate","module_id":"ai-ethics-core","title":"AI Ethics & Governance Intermediate","difficulty":"intermediate","order_index":2,"estimated_minutes":30},{"id":"ai-ethics-advanced","module_id":"ai-ethics-core","title":"AI Ethics & Governance Advanced","difficulty":"advanced","order_index":3,"estimated_minutes":35}]}]}],"curriculumKeys":["curriculum","findSubject","findTopic"]}
+{
+  "subjects": [
+    {
+      "id": "ai",
+      "title": "Artificial Intelligence",
+      "description": "Neural networks, expert systems, and foundational AI theory",
+      "icon": "Brain",
+      "color": "#3b82f6"
+    },
+    {
+      "id": "ml",
+      "title": "Machine Learning",
+      "description": "Supervised, unsupervised, and reinforcement learning algorithms",
+      "icon": "Activity",
+      "color": "#8b5cf6"
+    },
+    {
+      "id": "ds",
+      "title": "Data Science",
+      "description": "Statistics, EDA, and end-to-end data pipelines",
+      "icon": "BarChart3",
+      "color": "#10b981"
+    },
+    {
+      "id": "dl",
+      "title": "Deep Learning",
+      "description": "CNNs, RNNs, transformers, and advanced neural architectures",
+      "icon": "Layers",
+      "color": "#6366f1"
+    },
+    {
+      "id": "nlp",
+      "title": "Natural Language Processing",
+      "description": "Text mining, sentiment analysis, and LLM engineering",
+      "icon": "MessageSquare",
+      "color": "#0ea5e9"
+    },
+    {
+      "id": "cv",
+      "title": "Computer Vision",
+      "description": "Image classification, object detection, and segmentation models",
+      "icon": "Eye",
+      "color": "#a855f7"
+    },
+    {
+      "id": "genai",
+      "title": "Generative AI",
+      "description": "GANs, VAEs, diffusion models, and LLM fine-tuning",
+      "icon": "Sparkles",
+      "color": "#ec4899"
+    },
+    {
+      "id": "python",
+      "title": "Python Programming",
+      "description": "Core language features, OOP, async, and standard library",
+      "icon": "Code",
+      "color": "#06b6d4"
+    },
+    {
+      "id": "sql",
+      "title": "SQL & Databases",
+      "description": "Query design, indexing, transactions, and optimization",
+      "icon": "Database",
+      "color": "#14b8a6"
+    },
+    {
+      "id": "cloud",
+      "title": "Cloud Computing",
+      "description": "AWS/GCP/Azure fundamentals, IaaS/PaaS/SaaS, cost management",
+      "icon": "Cloud",
+      "color": "#f59e0b"
+    },
+    {
+      "id": "mlops",
+      "title": "MLOps",
+      "description": "CI/CD for ML, model serving, monitoring, and drift detection",
+      "icon": "Zap",
+      "color": "#ef4444"
+    },
+    {
+      "id": "data-eng",
+      "title": "Data Engineering",
+      "description": "Pipelines, ETL/ELT, orchestration with Airflow / dbt, lakehouse",
+      "icon": "Workflow",
+      "color": "#64748b"
+    },
+    {
+      "id": "llm",
+      "title": "Large Language Models",
+      "description": "Prompt engineering, fine-tuning, RAG, function calling, evaluation",
+      "icon": "Bot",
+      "color": "#7c3aed"
+    },
+    {
+      "id": "ai-ethics",
+      "title": "AI Ethics & Governance",
+      "description": "Bias mitigation, responsible AI, EU AI Act, model auditing",
+      "icon": "Shield",
+      "color": "#475569"
+    }
+  ],
+  "catalog": [
+    {
+      "id": "ai",
+      "title": "Artificial Intelligence",
+      "description": "Neural networks, expert systems, and foundational AI theory",
+      "icon": "Brain",
+      "color": "#3b82f6",
+      "is_active": true,
+      "modules": [
+        {
+          "id": "ai-core",
+          "subject_id": "ai",
+          "title": "Foundations of AI",
+          "description": "Historical milestones, state-space search, logic, and intelligent agent architectures",
+          "order_index": 1,
+          "topics": [
+            {
+              "id": "ai-intro-history",
+              "module_id": "ai-core",
+              "title": "History of AI",
+              "difficulty": "beginner",
+              "order_index": 1,
+              "estimated_minutes": 20,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "History of Artificial Intelligence (AI)",
+                  "url": "https://www.geeksforgeeks.org/history-of-artificial-intelligence-ai/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "History of Artificial Intelligence",
+                  "url": "https://en.wikipedia.org/wiki/History_of_artificial_intelligence"
+                }
+              ]
+            },
+            {
+              "id": "ai-intro-agents",
+              "module_id": "ai-core",
+              "title": "Search Algorithms (BFS/DFS/A*)",
+              "difficulty": "intermediate",
+              "order_index": 2,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Search Algorithms in AI",
+                  "url": "https://www.geeksforgeeks.org/search-algorithms-in-ai/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Search Algorithm",
+                  "url": "https://en.wikipedia.org/wiki/Search_algorithm"
+                }
+              ]
+            },
+            {
+              "id": "ai-intro-adversarial",
+              "module_id": "ai-core",
+              "title": "Adversarial Search",
+              "difficulty": "intermediate",
+              "order_index": 3,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Minimax Algorithm in AI",
+                  "url": "https://www.geeksforgeeks.org/minimax-algorithm-in-ai/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Minimax",
+                  "url": "https://en.wikipedia.org/wiki/Minimax"
+                }
+              ]
+            },
+            {
+              "id": "ai-intro-logic",
+              "module_id": "ai-core",
+              "title": "Logical Inference & Knowledge Representation",
+              "difficulty": "advanced",
+              "order_index": 4,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Knowledge Representation in AI",
+                  "url": "https://www.geeksforgeeks.org/knowledge-representation-in-ai/"
+                },
+                {
+                  "name": "Stanford Encyclopedia",
+                  "title": "Logic and Artificial Intelligence",
+                  "url": "https://plato.stanford.edu/entries/logic-ai/"
+                }
+              ]
+            },
+            {
+              "id": "ai-intro-expert",
+              "module_id": "ai-core",
+              "title": "Expert Systems",
+              "difficulty": "advanced",
+              "order_index": 5,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Expert Systems in AI",
+                  "url": "https://www.geeksforgeeks.org/expert-systems/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Expert System",
+                  "url": "https://en.wikipedia.org/wiki/Expert_system"
+                }
+              ]
+            },
+            {
+              "id": "ai-fundamentals",
+              "module_id": "ai-core",
+              "title": "Artificial Intelligence Fundamentals",
+              "difficulty": "beginner",
+              "order_index": 6,
+              "estimated_minutes": 25,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Artificial Intelligence: An Introduction",
+                  "url": "https://www.geeksforgeeks.org/artificial-intelligence-an-introduction/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Artificial Intelligence",
+                  "url": "https://en.wikipedia.org/wiki/Artificial_intelligence"
+                }
+              ]
+            },
+            {
+              "id": "ai-intermediate",
+              "module_id": "ai-core",
+              "title": "Artificial Intelligence Intermediate",
+              "difficulty": "intermediate",
+              "order_index": 7,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Artificial Intelligence Tutorial",
+                  "url": "https://www.geeksforgeeks.org/artificial-intelligence-tutorial/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Artificial Intelligence",
+                  "url": "https://en.wikipedia.org/wiki/Artificial_intelligence"
+                }
+              ]
+            },
+            {
+              "id": "ai-advanced",
+              "module_id": "ai-core",
+              "title": "Artificial Intelligence Advanced",
+              "difficulty": "advanced",
+              "order_index": 8,
+              "estimated_minutes": 35,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Advanced AI Concepts",
+                  "url": "https://www.geeksforgeeks.org/artificial-intelligence-tutorial/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Artificial Intelligence",
+                  "url": "https://en.wikipedia.org/wiki/Artificial_intelligence"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ml",
+      "title": "Machine Learning",
+      "description": "Supervised, unsupervised, and reinforcement learning algorithms",
+      "icon": "Activity",
+      "color": "#8b5cf6",
+      "is_active": true,
+      "modules": [
+        {
+          "id": "ml-core",
+          "subject_id": "ml",
+          "title": "Core Concepts",
+          "description": "Supervised, unsupervised, and reinforcement learning algorithms",
+          "order_index": 1,
+          "topics": [
+            {
+              "id": "ml-fundamentals",
+              "module_id": "ml-core",
+              "title": "Machine Learning Fundamentals: Core Paradigms",
+              "difficulty": "beginner",
+              "order_index": 1,
+              "estimated_minutes": 25,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Machine Learning Fundamentals Tutorial",
+                  "url": "https://www.geeksforgeeks.org/ml/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Machine Learning Fundamentals",
+                  "url": "https://en.wikipedia.org/wiki/Machine_Learning"
+                }
+              ]
+            },
+            {
+              "id": "ml-intermediate",
+              "module_id": "ml-core",
+              "title": "Machine Learning Intermediate: Supervised Models & Validation",
+              "difficulty": "intermediate",
+              "order_index": 2,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Machine Learning Intermediate Tutorial",
+                  "url": "https://www.geeksforgeeks.org/ml/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Machine Learning Intermediate",
+                  "url": "https://en.wikipedia.org/wiki/Machine_Learning"
+                }
+              ]
+            },
+            {
+              "id": "ml-advanced",
+              "module_id": "ml-core",
+              "title": "Machine Learning Advanced: Ensemble Methods & Tuning",
+              "difficulty": "advanced",
+              "order_index": 3,
+              "estimated_minutes": 35,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Machine Learning Advanced Tutorial",
+                  "url": "https://www.geeksforgeeks.org/ml/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Machine Learning Advanced",
+                  "url": "https://en.wikipedia.org/wiki/Machine_Learning"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ds",
+      "title": "Data Science",
+      "description": "Statistics, EDA, and end-to-end data pipelines",
+      "icon": "BarChart3",
+      "color": "#10b981",
+      "is_active": true,
+      "modules": [
+        {
+          "id": "ds-core",
+          "subject_id": "ds",
+          "title": "Core Concepts",
+          "description": "Statistics, EDA, and end-to-end data pipelines",
+          "order_index": 1,
+          "topics": [
+            {
+              "id": "ds-fundamentals",
+              "module_id": "ds-core",
+              "title": "Data Science Fundamentals: Data Lifecycles & Summary Statistics",
+              "difficulty": "beginner",
+              "order_index": 1,
+              "estimated_minutes": 25,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Data Science Fundamentals Tutorial",
+                  "url": "https://www.geeksforgeeks.org/ds/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Data Science Fundamentals",
+                  "url": "https://en.wikipedia.org/wiki/Data_Science"
+                }
+              ]
+            },
+            {
+              "id": "ds-intermediate",
+              "module_id": "ds-core",
+              "title": "Data Science Intermediate: Exploratory Analysis & Feature Engineering",
+              "difficulty": "intermediate",
+              "order_index": 2,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Data Science Intermediate Tutorial",
+                  "url": "https://www.geeksforgeeks.org/ds/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Data Science Intermediate",
+                  "url": "https://en.wikipedia.org/wiki/Data_Science"
+                }
+              ]
+            },
+            {
+              "id": "ds-advanced",
+              "module_id": "ds-core",
+              "title": "Data Science Advanced: Hypothesis Testing & Statistical Inference",
+              "difficulty": "advanced",
+              "order_index": 3,
+              "estimated_minutes": 35,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Data Science Advanced Tutorial",
+                  "url": "https://www.geeksforgeeks.org/ds/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Data Science Advanced",
+                  "url": "https://en.wikipedia.org/wiki/Data_Science"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "dl",
+      "title": "Deep Learning",
+      "description": "CNNs, RNNs, transformers, and advanced neural architectures",
+      "icon": "Layers",
+      "color": "#6366f1",
+      "is_active": true,
+      "modules": [
+        {
+          "id": "dl-core",
+          "subject_id": "dl",
+          "title": "Core Concepts",
+          "description": "CNNs, RNNs, transformers, and advanced neural architectures",
+          "order_index": 1,
+          "topics": [
+            {
+              "id": "dl-fundamentals",
+              "module_id": "dl-core",
+              "title": "Deep Learning Fundamentals: Neural Networks & Backpropagation",
+              "difficulty": "beginner",
+              "order_index": 1,
+              "estimated_minutes": 25,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Deep Learning Fundamentals Tutorial",
+                  "url": "https://www.geeksforgeeks.org/dl/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Deep Learning Fundamentals",
+                  "url": "https://en.wikipedia.org/wiki/Deep_Learning"
+                }
+              ]
+            },
+            {
+              "id": "dl-intermediate",
+              "module_id": "dl-core",
+              "title": "Deep Learning Intermediate: Convolutional Networks & Vision",
+              "difficulty": "intermediate",
+              "order_index": 2,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Deep Learning Intermediate Tutorial",
+                  "url": "https://www.geeksforgeeks.org/dl/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Deep Learning Intermediate",
+                  "url": "https://en.wikipedia.org/wiki/Deep_Learning"
+                }
+              ]
+            },
+            {
+              "id": "dl-advanced",
+              "module_id": "dl-core",
+              "title": "Deep Learning Advanced: Recurrent Architectures & Transformers",
+              "difficulty": "advanced",
+              "order_index": 3,
+              "estimated_minutes": 35,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Deep Learning Advanced Tutorial",
+                  "url": "https://www.geeksforgeeks.org/dl/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Deep Learning Advanced",
+                  "url": "https://en.wikipedia.org/wiki/Deep_Learning"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "nlp",
+      "title": "Natural Language Processing",
+      "description": "Text mining, sentiment analysis, and LLM engineering",
+      "icon": "MessageSquare",
+      "color": "#0ea5e9",
+      "is_active": true,
+      "modules": [
+        {
+          "id": "nlp-core",
+          "subject_id": "nlp",
+          "title": "Core Concepts",
+          "description": "Text mining, sentiment analysis, and LLM engineering",
+          "order_index": 1,
+          "topics": [
+            {
+              "id": "nlp-fundamentals",
+              "module_id": "nlp-core",
+              "title": "Natural Language Processing Fundamentals: Text Processing & Tokenization",
+              "difficulty": "beginner",
+              "order_index": 1,
+              "estimated_minutes": 25,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Natural Language Processing Fundamentals Tutorial",
+                  "url": "https://www.geeksforgeeks.org/nlp/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Natural Language Processing Fundamentals",
+                  "url": "https://en.wikipedia.org/wiki/Natural_Language%20Processing"
+                }
+              ]
+            },
+            {
+              "id": "nlp-intermediate",
+              "module_id": "nlp-core",
+              "title": "Natural Language Processing Intermediate: Word Embeddings & Vector Semantics",
+              "difficulty": "intermediate",
+              "order_index": 2,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Natural Language Processing Intermediate Tutorial",
+                  "url": "https://www.geeksforgeeks.org/nlp/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Natural Language Processing Intermediate",
+                  "url": "https://en.wikipedia.org/wiki/Natural_Language%20Processing"
+                }
+              ]
+            },
+            {
+              "id": "nlp-advanced",
+              "module_id": "nlp-core",
+              "title": "Natural Language Processing Advanced: Transformers & Contextual Models",
+              "difficulty": "advanced",
+              "order_index": 3,
+              "estimated_minutes": 35,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Natural Language Processing Advanced Tutorial",
+                  "url": "https://www.geeksforgeeks.org/nlp/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Natural Language Processing Advanced",
+                  "url": "https://en.wikipedia.org/wiki/Natural_Language%20Processing"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cv",
+      "title": "Computer Vision",
+      "description": "Image classification, object detection, and segmentation models",
+      "icon": "Eye",
+      "color": "#a855f7",
+      "is_active": true,
+      "modules": [
+        {
+          "id": "cv-core",
+          "subject_id": "cv",
+          "title": "Core Concepts",
+          "description": "Image classification, object detection, and segmentation models",
+          "order_index": 1,
+          "topics": [
+            {
+              "id": "cv-fundamentals",
+              "module_id": "cv-core",
+              "title": "Computer Vision Fundamentals: Digital Pixels, Filters & Edges",
+              "difficulty": "beginner",
+              "order_index": 1,
+              "estimated_minutes": 25,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Computer Vision Fundamentals Tutorial",
+                  "url": "https://www.geeksforgeeks.org/cv/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Computer Vision Fundamentals",
+                  "url": "https://en.wikipedia.org/wiki/Computer_Vision"
+                }
+              ]
+            },
+            {
+              "id": "cv-intermediate",
+              "module_id": "cv-core",
+              "title": "Computer Vision Intermediate: Object Detection & Segmentation",
+              "difficulty": "intermediate",
+              "order_index": 2,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Computer Vision Intermediate Tutorial",
+                  "url": "https://www.geeksforgeeks.org/cv/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Computer Vision Intermediate",
+                  "url": "https://en.wikipedia.org/wiki/Computer_Vision"
+                }
+              ]
+            },
+            {
+              "id": "cv-advanced",
+              "module_id": "cv-core",
+              "title": "Computer Vision Advanced: Vision Transformers & Generative Models",
+              "difficulty": "advanced",
+              "order_index": 3,
+              "estimated_minutes": 35,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Computer Vision Advanced Tutorial",
+                  "url": "https://www.geeksforgeeks.org/cv/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Computer Vision Advanced",
+                  "url": "https://en.wikipedia.org/wiki/Computer_Vision"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "genai",
+      "title": "Generative AI",
+      "description": "GANs, VAEs, diffusion models, and LLM fine-tuning",
+      "icon": "Sparkles",
+      "color": "#ec4899",
+      "is_active": true,
+      "modules": [
+        {
+          "id": "genai-core",
+          "subject_id": "genai",
+          "title": "Core Concepts",
+          "description": "GANs, VAEs, diffusion models, and LLM fine-tuning",
+          "order_index": 1,
+          "topics": [
+            {
+              "id": "genai-fundamentals",
+              "module_id": "genai-core",
+              "title": "Generative AI Fundamentals: Generative vs. Discriminative Models",
+              "difficulty": "beginner",
+              "order_index": 1,
+              "estimated_minutes": 25,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Generative AI Fundamentals Tutorial",
+                  "url": "https://www.geeksforgeeks.org/genai/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Generative AI Fundamentals",
+                  "url": "https://en.wikipedia.org/wiki/Generative_AI"
+                }
+              ]
+            },
+            {
+              "id": "genai-intermediate",
+              "module_id": "genai-core",
+              "title": "Generative AI Intermediate: GANs, VAEs & Diffusion Models",
+              "difficulty": "intermediate",
+              "order_index": 2,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Generative AI Intermediate Tutorial",
+                  "url": "https://www.geeksforgeeks.org/genai/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Generative AI Intermediate",
+                  "url": "https://en.wikipedia.org/wiki/Generative_AI"
+                }
+              ]
+            },
+            {
+              "id": "genai-advanced",
+              "module_id": "genai-core",
+              "title": "Generative AI Advanced: RAG & Parameter-Efficient Fine-Tuning",
+              "difficulty": "advanced",
+              "order_index": 3,
+              "estimated_minutes": 35,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Generative AI Advanced Tutorial",
+                  "url": "https://www.geeksforgeeks.org/genai/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Generative AI Advanced",
+                  "url": "https://en.wikipedia.org/wiki/Generative_AI"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "python",
+      "title": "Python Programming",
+      "description": "Core language features, OOP, async, and standard library",
+      "icon": "Code",
+      "color": "#06b6d4",
+      "is_active": true,
+      "modules": [
+        {
+          "id": "python-core",
+          "subject_id": "python",
+          "title": "Core Concepts",
+          "description": "Core language features, OOP, async, and standard library",
+          "order_index": 1,
+          "topics": [
+            {
+              "id": "python-fundamentals",
+              "module_id": "python-core",
+              "title": "Python Programming Fundamentals: Data Structures & Memory",
+              "difficulty": "beginner",
+              "order_index": 1,
+              "estimated_minutes": 25,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Python Programming Fundamentals Tutorial",
+                  "url": "https://www.geeksforgeeks.org/python-programming-language/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Python Programming Fundamentals",
+                  "url": "https://en.wikipedia.org/wiki/Python_Programming"
+                }
+              ]
+            },
+            {
+              "id": "python-intermediate",
+              "module_id": "python-core",
+              "title": "Python Programming Intermediate: Object-Oriented Design & Decorators",
+              "difficulty": "intermediate",
+              "order_index": 2,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Python Programming Intermediate Tutorial",
+                  "url": "https://www.geeksforgeeks.org/python-programming-language/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Python Programming Intermediate",
+                  "url": "https://en.wikipedia.org/wiki/Python_Programming"
+                }
+              ]
+            },
+            {
+              "id": "python-advanced",
+              "module_id": "python-core",
+              "title": "Python Programming Advanced: Async Concurrency & Metaprogramming",
+              "difficulty": "advanced",
+              "order_index": 3,
+              "estimated_minutes": 35,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Python Programming Advanced Tutorial",
+                  "url": "https://www.geeksforgeeks.org/python-programming-language/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Python Programming Advanced",
+                  "url": "https://en.wikipedia.org/wiki/Python_Programming"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "sql",
+      "title": "SQL & Databases",
+      "description": "Query design, indexing, transactions, and optimization",
+      "icon": "Database",
+      "color": "#14b8a6",
+      "is_active": true,
+      "modules": [
+        {
+          "id": "sql-core",
+          "subject_id": "sql",
+          "title": "Core Concepts",
+          "description": "Query design, indexing, transactions, and optimization",
+          "order_index": 1,
+          "topics": [
+            {
+              "id": "sql-fundamentals",
+              "module_id": "sql-core",
+              "title": "SQL & Databases Fundamentals: Schema Design & Queries",
+              "difficulty": "beginner",
+              "order_index": 1,
+              "estimated_minutes": 25,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "SQL & Databases Fundamentals Tutorial",
+                  "url": "https://www.geeksforgeeks.org/sql-tutorial/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "SQL & Databases Fundamentals",
+                  "url": "https://en.wikipedia.org/wiki/SQL_%26%20Databases"
+                }
+              ]
+            },
+            {
+              "id": "sql-intermediate",
+              "module_id": "sql-core",
+              "title": "SQL & Databases Intermediate: Joins, Aggregations & Window Functions",
+              "difficulty": "intermediate",
+              "order_index": 2,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "SQL & Databases Intermediate Tutorial",
+                  "url": "https://www.geeksforgeeks.org/sql-tutorial/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "SQL & Databases Intermediate",
+                  "url": "https://en.wikipedia.org/wiki/SQL_%26%20Databases"
+                }
+              ]
+            },
+            {
+              "id": "sql-advanced",
+              "module_id": "sql-core",
+              "title": "SQL & Databases Advanced: Indexing, Transactions & Optimization",
+              "difficulty": "advanced",
+              "order_index": 3,
+              "estimated_minutes": 35,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "SQL & Databases Advanced Tutorial",
+                  "url": "https://www.geeksforgeeks.org/sql-tutorial/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "SQL & Databases Advanced",
+                  "url": "https://en.wikipedia.org/wiki/SQL_%26%20Databases"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cloud",
+      "title": "Cloud Computing",
+      "description": "AWS/GCP/Azure fundamentals, IaaS/PaaS/SaaS, cost management",
+      "icon": "Cloud",
+      "color": "#f59e0b",
+      "is_active": true,
+      "modules": [
+        {
+          "id": "cloud-core",
+          "subject_id": "cloud",
+          "title": "Core Concepts",
+          "description": "AWS/GCP/Azure fundamentals, IaaS/PaaS/SaaS, cost management",
+          "order_index": 1,
+          "topics": [
+            {
+              "id": "cloud-fundamentals",
+              "module_id": "cloud-core",
+              "title": "Cloud Computing Fundamentals: Service Models & Shared Responsibility",
+              "difficulty": "beginner",
+              "order_index": 1,
+              "estimated_minutes": 25,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Cloud Computing Fundamentals Tutorial",
+                  "url": "https://www.geeksforgeeks.org/cloud/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Cloud Computing Fundamentals",
+                  "url": "https://en.wikipedia.org/wiki/Cloud_Computing"
+                }
+              ]
+            },
+            {
+              "id": "cloud-intermediate",
+              "module_id": "cloud-core",
+              "title": "Cloud Computing Intermediate: Containers, Serverless & Microservices",
+              "difficulty": "intermediate",
+              "order_index": 2,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Cloud Computing Intermediate Tutorial",
+                  "url": "https://www.geeksforgeeks.org/cloud/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Cloud Computing Intermediate",
+                  "url": "https://en.wikipedia.org/wiki/Cloud_Computing"
+                }
+              ]
+            },
+            {
+              "id": "cloud-advanced",
+              "module_id": "cloud-core",
+              "title": "Cloud Computing Advanced: High Availability & Security Architecture",
+              "difficulty": "advanced",
+              "order_index": 3,
+              "estimated_minutes": 35,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Cloud Computing Advanced Tutorial",
+                  "url": "https://www.geeksforgeeks.org/cloud/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Cloud Computing Advanced",
+                  "url": "https://en.wikipedia.org/wiki/Cloud_Computing"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "mlops",
+      "title": "MLOps",
+      "description": "CI/CD for ML, model serving, monitoring, and drift detection",
+      "icon": "Zap",
+      "color": "#ef4444",
+      "is_active": true,
+      "modules": [
+        {
+          "id": "mlops-core",
+          "subject_id": "mlops",
+          "title": "Core Concepts",
+          "description": "CI/CD for ML, model serving, monitoring, and drift detection",
+          "order_index": 1,
+          "topics": [
+            {
+              "id": "mlops-fundamentals",
+              "module_id": "mlops-core",
+              "title": "MLOps Fundamentals: The Machine Learning Lifecycle",
+              "difficulty": "beginner",
+              "order_index": 1,
+              "estimated_minutes": 25,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "MLOps Fundamentals Tutorial",
+                  "url": "https://www.geeksforgeeks.org/mlops/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "MLOps Fundamentals",
+                  "url": "https://en.wikipedia.org/wiki/MLOps"
+                }
+              ]
+            },
+            {
+              "id": "mlops-intermediate",
+              "module_id": "mlops-core",
+              "title": "MLOps Intermediate: Experiment Tracking & Automated Pipelines",
+              "difficulty": "intermediate",
+              "order_index": 2,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "MLOps Intermediate Tutorial",
+                  "url": "https://www.geeksforgeeks.org/mlops/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "MLOps Intermediate",
+                  "url": "https://en.wikipedia.org/wiki/MLOps"
+                }
+              ]
+            },
+            {
+              "id": "mlops-advanced",
+              "module_id": "mlops-core",
+              "title": "MLOps Advanced: Real-Time Serving, Drift Detection & Monitoring",
+              "difficulty": "advanced",
+              "order_index": 3,
+              "estimated_minutes": 35,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "MLOps Advanced Tutorial",
+                  "url": "https://www.geeksforgeeks.org/mlops/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "MLOps Advanced",
+                  "url": "https://en.wikipedia.org/wiki/MLOps"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "data-eng",
+      "title": "Data Engineering",
+      "description": "Pipelines, ETL/ELT, orchestration with Airflow / dbt, lakehouse",
+      "icon": "Workflow",
+      "color": "#64748b",
+      "is_active": true,
+      "modules": [
+        {
+          "id": "data-eng-core",
+          "subject_id": "data-eng",
+          "title": "Core Concepts",
+          "description": "Pipelines, ETL/ELT, orchestration with Airflow / dbt, lakehouse",
+          "order_index": 1,
+          "topics": [
+            {
+              "id": "data-eng-fundamentals",
+              "module_id": "data-eng-core",
+              "title": "Data Engineering Fundamentals: Batch vs. Stream Processing",
+              "difficulty": "beginner",
+              "order_index": 1,
+              "estimated_minutes": 25,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Data Engineering Fundamentals Tutorial",
+                  "url": "https://www.geeksforgeeks.org/data-eng/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Data Engineering Fundamentals",
+                  "url": "https://en.wikipedia.org/wiki/Data_Engineering"
+                }
+              ]
+            },
+            {
+              "id": "data-eng-intermediate",
+              "module_id": "data-eng-core",
+              "title": "Data Engineering Intermediate: ETL Pipelines & Orchestration",
+              "difficulty": "intermediate",
+              "order_index": 2,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Data Engineering Intermediate Tutorial",
+                  "url": "https://www.geeksforgeeks.org/data-eng/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Data Engineering Intermediate",
+                  "url": "https://en.wikipedia.org/wiki/Data_Engineering"
+                }
+              ]
+            },
+            {
+              "id": "data-eng-advanced",
+              "module_id": "data-eng-core",
+              "title": "Data Engineering Advanced: Distributed Systems & Lakehouse Architecture",
+              "difficulty": "advanced",
+              "order_index": 3,
+              "estimated_minutes": 35,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Data Engineering Advanced Tutorial",
+                  "url": "https://www.geeksforgeeks.org/data-eng/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Data Engineering Advanced",
+                  "url": "https://en.wikipedia.org/wiki/Data_Engineering"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "llm",
+      "title": "Large Language Models",
+      "description": "Prompt engineering, fine-tuning, RAG, function calling, evaluation",
+      "icon": "Bot",
+      "color": "#7c3aed",
+      "is_active": true,
+      "modules": [
+        {
+          "id": "llm-core",
+          "subject_id": "llm",
+          "title": "Core Concepts",
+          "description": "Prompt engineering, fine-tuning, RAG, function calling, evaluation",
+          "order_index": 1,
+          "topics": [
+            {
+              "id": "llm-fundamentals",
+              "module_id": "llm-core",
+              "title": "Large Language Models Fundamentals: Autoregressive Generation & Context",
+              "difficulty": "beginner",
+              "order_index": 1,
+              "estimated_minutes": 25,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Large Language Models Fundamentals Tutorial",
+                  "url": "https://www.geeksforgeeks.org/llm/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Large Language Models Fundamentals",
+                  "url": "https://en.wikipedia.org/wiki/Large_Language%20Models"
+                }
+              ]
+            },
+            {
+              "id": "llm-intermediate",
+              "module_id": "llm-core",
+              "title": "Large Language Models Intermediate: Prompt Engineering & Few-Shot Learning",
+              "difficulty": "intermediate",
+              "order_index": 2,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Large Language Models Intermediate Tutorial",
+                  "url": "https://www.geeksforgeeks.org/llm/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Large Language Models Intermediate",
+                  "url": "https://en.wikipedia.org/wiki/Large_Language%20Models"
+                }
+              ]
+            },
+            {
+              "id": "llm-advanced",
+              "module_id": "llm-core",
+              "title": "Large Language Models Advanced: Instruction Tuning, RLHF & Agent Workflows",
+              "difficulty": "advanced",
+              "order_index": 3,
+              "estimated_minutes": 35,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "Large Language Models Advanced Tutorial",
+                  "url": "https://www.geeksforgeeks.org/llm/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "Large Language Models Advanced",
+                  "url": "https://en.wikipedia.org/wiki/Large_Language%20Models"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "ai-ethics",
+      "title": "AI Ethics & Governance",
+      "description": "Bias mitigation, responsible AI, EU AI Act, model auditing",
+      "icon": "Shield",
+      "color": "#475569",
+      "is_active": true,
+      "modules": [
+        {
+          "id": "ai-ethics-core",
+          "subject_id": "ai-ethics",
+          "title": "Core Concepts",
+          "description": "Bias mitigation, responsible AI, EU AI Act, model auditing",
+          "order_index": 1,
+          "topics": [
+            {
+              "id": "ai-ethics-fundamentals",
+              "module_id": "ai-ethics-core",
+              "title": "AI Ethics & Governance Fundamentals: Algorithmic Bias & Fairness",
+              "difficulty": "beginner",
+              "order_index": 1,
+              "estimated_minutes": 25,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "AI Ethics & Governance Fundamentals Tutorial",
+                  "url": "https://www.geeksforgeeks.org/ai-ethics/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "AI Ethics & Governance Fundamentals",
+                  "url": "https://en.wikipedia.org/wiki/AI_Ethics%20%26%20Governance"
+                }
+              ]
+            },
+            {
+              "id": "ai-ethics-intermediate",
+              "module_id": "ai-ethics-core",
+              "title": "AI Ethics & Governance Intermediate: Model Interpretability & Auditing",
+              "difficulty": "intermediate",
+              "order_index": 2,
+              "estimated_minutes": 30,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "AI Ethics & Governance Intermediate Tutorial",
+                  "url": "https://www.geeksforgeeks.org/ai-ethics/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "AI Ethics & Governance Intermediate",
+                  "url": "https://en.wikipedia.org/wiki/AI_Ethics%20%26%20Governance"
+                }
+              ]
+            },
+            {
+              "id": "ai-ethics-advanced",
+              "module_id": "ai-ethics-core",
+              "title": "AI Ethics & Governance Advanced: Regulatory Frameworks & Compliance",
+              "difficulty": "advanced",
+              "order_index": 3,
+              "estimated_minutes": 35,
+              "sources": [
+                {
+                  "name": "GeeksforGeeks",
+                  "title": "AI Ethics & Governance Advanced Tutorial",
+                  "url": "https://www.geeksforgeeks.org/ai-ethics/"
+                },
+                {
+                  "name": "Wikipedia",
+                  "title": "AI Ethics & Governance Advanced",
+                  "url": "https://en.wikipedia.org/wiki/AI_Ethics%20%26%20Governance"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "curriculumKeys": [
+    "curriculum",
+    "findSubject",
+    "findTopic"
+  ]
+}

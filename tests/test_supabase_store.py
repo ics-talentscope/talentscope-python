@@ -80,6 +80,7 @@ def test_count_uses_exact_content_range():
     def handler(request):
         assert request.method == "HEAD"
         assert request.headers["prefer"] == "count=exact"
+        assert request.url.params["select"] == "*"
         return httpx.Response(200, headers={"content-range": "0-0/7"})
 
     store = make_store(handler)
@@ -104,6 +105,37 @@ def test_insert_sends_json_and_requests_returned_row():
         store.client.close()
 
     assert row == {"key": "theme", "value": {"mode": "dark"}}
+
+
+def test_question_set_insert_does_not_send_an_id():
+    def handler(request):
+        payload = json.loads(request.content)
+        assert payload == {"resume_id": "resume-1", "status": "queued"}
+        return httpx.Response(201, json=[payload])
+
+    store = make_store(handler)
+    try:
+        row = store.insert("question_sets", {"resume_id": "resume-1", "status": "queued"})[0]
+    finally:
+        store.client.close()
+
+    assert row == {"resume_id": "resume-1", "status": "queued"}
+
+
+def test_question_set_upsert_does_not_send_an_id():
+    def handler(request):
+        payload = json.loads(request.content)
+        assert payload == {"resume_id": "resume-1", "status": "queued"}
+        assert request.url.params["on_conflict"] == "resume_id"
+        return httpx.Response(200, json=[payload])
+
+    store = make_store(handler)
+    try:
+        row = store.upsert("question_sets", {"resume_id": "resume-1", "status": "queued"}, "resume_id")
+    finally:
+        store.client.close()
+
+    assert row == {"resume_id": "resume-1", "status": "queued"}
 
 
 def test_update_delete_and_upsert_use_postgrest_methods():
@@ -156,6 +188,19 @@ def test_get_store_uses_supabase_when_selected(monkeypatch):
     db_module.set_store(None)
     monkeypatch.setattr(db_module, "db_target", lambda: "SUPABASE")
     monkeypatch.setattr(db_module, "SupabaseStore", lambda: selected)
+
+    try:
+        assert db_module.get_store() is selected
+    finally:
+        db_module.set_store(None)
+
+
+def test_get_store_requires_explicit_db_target_for_supabase(monkeypatch):
+    selected = object()
+    db_module.set_store(None)
+    monkeypatch.setenv("DB_PROVIDER", "supabase")
+    monkeypatch.setattr(db_module, "db_target", lambda: "MSSQL")
+    monkeypatch.setattr(db_module, "MssqlStore", lambda: selected)
 
     try:
         assert db_module.get_store() is selected

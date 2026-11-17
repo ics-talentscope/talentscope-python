@@ -150,18 +150,75 @@ def load_mapping_rows() -> list[dict]:
     return rows
 
 
+def _questions_from_active_test(employee_id: str) -> list[str]:
+    """Prefer live product-assessment questions over the mapping workbook snapshot."""
+    store = get_store()
+    emp_id = normalize_employee_id(employee_id)
+    if not emp_id:
+        return []
+    tests = store.query(
+        """
+        SELECT TOP 1 t.id
+        FROM dbo.tests t
+        WHERE (t.employee_code = ? OR CONVERT(nvarchar(64), t.employee_id) = ?)
+          AND (t.topic_id = ? OR t.topic_title IS NOT NULL)
+        ORDER BY
+          CASE WHEN t.topic_id = ? THEN 0 ELSE 1 END,
+          t.created_at DESC
+        """,
+        (emp_id, emp_id, PRODUCT_TOPIC, PRODUCT_TOPIC),
+    )
+    if not tests:
+        # Fallback: latest test for this employee code regardless of topic
+        tests = store.query(
+            """
+            SELECT TOP 1 t.id
+            FROM dbo.tests t
+            WHERE t.employee_code = ?
+            ORDER BY t.created_at DESC
+            """,
+            (emp_id,),
+        )
+    if not tests:
+        return []
+    rows = store.query(
+        """
+        SELECT question_text
+        FROM dbo.test_questions
+        WHERE test_id = ?
+        ORDER BY question_index ASC
+        """,
+        (tests[0]["id"],),
+    )
+    return [str(r.get("question_text") or "").strip() for r in rows if str(r.get("question_text") or "").strip()]
+
+
 def assigned_questions_for(employee_id: str) -> list[str]:
+    live = _questions_from_active_test(employee_id)
+    if live:
+        return live
     norm = normalize_employee_id(employee_id)
     row = next((r for r in load_mapping_rows() if normalize_employee_id(r["employee_id"]) == norm), None)
-    return row["assigned_questions"] if row else []
+    return list(row["assigned_questions"]) if row and row.get("assigned_questions") else []
+
+
+def _domain_value(value) -> str:
+    """Treat placeholder department 'general' as empty so mapping Domain can win."""
+    text = str(value or "").strip()
+    if not text or text.lower() == "general":
+        return ""
+    return text
 
 
 def _eligible_accounts() -> list[dict]:
     rows = get_store().select("employees", {"product_qb_eligible": True},
-                              ["employee_id", "email", "full_name", "department", "role", "product"], "employee_id asc")
+                              ["employee_id", "email", "full_name", "department", "role", "product", "designation"], "employee_id asc")
     return [{
         "employee_id": str(r["employee_id"]), "full_name": r.get("full_name") or str(r["employee_id"]), "role": r.get("role") or "employee",
-        "domain": r.get("department") or "", "product": r.get("product") or "", "email": r.get("email") or "", "ddh": "",
+        "domain": _domain_value(r.get("department")), "product": r.get("product") or "", "email": r.get("email") or "", "ddh": "",
+        "department": r.get("department") or "", "designation": r.get("designation") or "",
+        "account_product": r.get("product") or "",
+        "product_qb_eligible": True,
         "emp_status": "Confirmed", "remarks": "", "assigned_questions": [], "assigned_question_count": 0,
     } for r in rows if r.get("employee_id")]
 
@@ -169,13 +226,25 @@ def _eligible_accounts() -> list[dict]:
 def _merge(roster: dict, mapped: Optional[dict]) -> dict:
     if not mapped:
         return roster
+    mapped_qs = list(mapped.get("assigned_questions") or [])
+    roster_qs = list(roster.get("assigned_questions") or [])
+    questions = mapped_qs or roster_qs
+    # Prefer real mapping Domain/Product over placeholder roster values like "general".
+    domain = _domain_value(mapped.get("domain")) or _domain_value(roster.get("domain"))
+    product = (mapped.get("product") or "").strip() or (roster.get("product") or "").strip()
     return {
         "employee_id": roster["employee_id"] or mapped["employee_id"], "full_name": roster["full_name"] or mapped["full_name"],
-        "role": roster["role"] or mapped["role"], "domain": roster["domain"] or mapped["domain"],
-        "product": roster["product"] or mapped["product"], "email": roster["email"] or mapped["email"], "ddh": roster["ddh"] or mapped["ddh"],
+        "role": roster["role"] or mapped["role"], "domain": domain,
+        "product": product, "email": roster["email"] or mapped["email"], "ddh": roster["ddh"] or mapped["ddh"],
+        "department": roster.get("department") or mapped.get("domain") or "",
+        "designation": roster.get("designation") or mapped.get("designation") or "",
+        "account_product": roster.get("account_product") or mapped.get("account_product") or "",
+        "product_qb_eligible": bool(roster.get("product_qb_eligible")),
         "emp_status": mapped["emp_status"] or roster["emp_status"], "remarks": mapped["remarks"] or roster["remarks"],
-        "assigned_questions": mapped["assigned_questions"],
-        "assigned_question_count": mapped["assigned_question_count"] or roster["assigned_question_count"],
+        "assigned_questions": questions,
+        "assigned_question_count": mapped.get("assigned_question_count")
+        or roster.get("assigned_question_count")
+        or len(questions),
     }
 
 
@@ -200,7 +269,11 @@ def merge_portal_data(profile_rows: list[dict], results: list[dict], manifest: d
     out = []
     for row in profile_rows:
         key = normalize_employee_id(row["employee_id"])
-        tests = [t for t in by_emp.get(key, []) if not str(t.get("topicId") or "").startswith(HISTORY_PREFIX)]
+        def assigned_at(test: dict) -> str:
+            return str(test.get("createdAt") or test.get("startedAt") or test.get("completedAt") or "")
+
+        all_tests = sorted(by_emp.get(key, []), key=lambda test: (assigned_at(test), str(test.get("id") or "")))
+        tests = [t for t in all_tests if not str(t.get("topicId") or "").startswith(HISTORY_PREFIX)]
         manifest_id = manifest.get(row["employee_id"]) or manifest.get(key)
         status_of = lambda t: str(t.get("status") or "").lower()
         completed = sorted((t for t in tests if status_of(t) == "completed"), key=lambda t: str(t.get("completedAt") or ""), reverse=True)
@@ -228,11 +301,11 @@ def merge_portal_data(profile_rows: list[dict], results: list[dict], manifest: d
             "test_status": derive_status(row.get("assigned_question_count") or (25 if manifest_id else 0), status_test_id, raw_status, answered, total,
                                          (assigned or primary or {}).get("startedAt")),
             "score": score, "score_max": score_max, "completed_at": completed_at,
-            "tests": [{"id": t["id"], "topicTitle": format_topic_title_for_display(t.get("topicTitle")), "subjectTitle": t.get("subjectTitle"),
+            "tests": [{"id": t["id"], "topicId": t.get("topicId"), "topicTitle": format_topic_title_for_display(t.get("topicTitle")), "subjectTitle": t.get("subjectTitle"),
                        "difficulty": t.get("difficulty"), "totalQuestions": t.get("totalQuestions"), "status": t.get("status"),
                        "score": t.get("correctCount") if t.get("correctCount") is not None else t.get("score"), "scoreMax": t.get("totalQuestions"),
                        "videoUrl": t.get("videoUrl"), "hasRecording": bool(t.get("hasRecording")), "proctoring": t.get("proctoring"),
-                       "startedAt": t.get("startedAt"), "completedAt": t.get("completedAt")} for t in tests],
+                       "startedAt": t.get("startedAt"), "completedAt": t.get("completedAt"), "createdAt": t.get("createdAt")} for t in all_tests],
         })
     return out
 

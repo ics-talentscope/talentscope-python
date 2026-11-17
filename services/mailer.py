@@ -64,7 +64,8 @@ def send(to: str, subject: str, html: str) -> None:
 
 def dispatch(to: str, subject: str, html: str) -> tuple[str, Optional[str]]:
     if not configured():
-        return "simulated", None
+        log.warning("SMTP not configured; recording invite as simulated for %s", to)
+        return "simulated", "SMTP is not configured (set SMTP_HOST and SMTP_FROM/SMTP_USER)."
     try:
         send(to, subject, html)
         return "sent", None

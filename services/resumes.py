@@ -21,10 +21,12 @@ _cache_lock = threading.Lock()
 _executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="resume-ai")
 
 TECH_SKILLS = [
-    "javascript", "typescript", "python", "react", "vue", "angular", "node", "express", "java", "spring", "c#", ".net",
+    "javascript", "typescript", "python", "react", "vue", "angular", "node", "express", "java", "j2ee", "spring", "c#", ".net",
     "go", "rust", "php", "docker", "kubernetes", "aws", "azure", "gcp", "postgresql", "mongodb", "mysql", "redis", "git",
     "ci/cd", "html", "css", "sass", "webpack", "linux", "bash",
 ]
+SOFT_SKILLS = ["communication", "leadership", "teamwork", "problem-solving"]
+TOOLS = ["git", "docker", "jira"]
 
 HEADERS = [
     ("summary", r"^(?:profile\s+summary|summary|profile|professional\s+summary|objective|career\s+objective|about\s+me|about)$"),
@@ -227,11 +229,16 @@ def _parse_projects(content: str) -> list[dict]:
 
 
 def _skills(text: str) -> dict:
-    lower = text.lower()
+    def contains_skill(skill: str) -> bool:
+        if skill == ".net":
+            return bool(re.search(r"\.net(?![A-Za-z0-9])", text, re.I))
+        pattern = rf"(?<![A-Za-z0-9]){re.escape(skill)}(?![A-Za-z0-9])"
+        return bool(re.search(pattern, text, re.I))
+
     return {
-        "technical": [s for s in TECH_SKILLS if s in lower],
-        "soft": ["communication", "leadership", "teamwork", "problem-solving"],
-        "tools": ["git", "docker", "jira"],
+        "technical": [s for s in TECH_SKILLS if contains_skill(s)],
+        "soft": [s for s in SOFT_SKILLS if contains_skill(s)],
+        "tools": [s for s in TOOLS if contains_skill(s)],
         "languages": [],
         "other": [],
     }
@@ -420,12 +427,18 @@ def _json_field(value: Any) -> Any:
     return {}
 
 
-def _map_row(row: dict) -> dict:
+def _apply_source_skills(resume: dict) -> None:
+    parsed = resume.get("parsed")
+    if isinstance(parsed, dict):
+        parsed["skills"] = _skills(str(resume.get("originalText") or ""))
+
+
+def _map_row(row: dict, include_original_text: bool = True) -> dict:
     created = row.get("created_at") or _now()
-    return {
+    resume = {
         "id": row.get("id"),
         "filename": row.get("filename") or "unknown",
-        "originalText": row.get("text_content") or "",
+        "originalText": (row.get("text_content") or "") if include_original_text else "",
         "parsed": _json_field(row.get("parsed")),
         "analysis": _json_field(row.get("analysis")),
         "enhanced": _json_field(row.get("enhanced")),
@@ -437,6 +450,8 @@ def _map_row(row: dict) -> dict:
         "updatedAt": row.get("updated_at") or created,
         "status": "failed" if row.get("error") else "completed",
     }
+    _apply_source_skills(resume)
+    return resume
 
 
 def save_row(resume: dict) -> None:
@@ -468,6 +483,7 @@ def get_resume(resume_id: str, force_fresh: bool = False) -> Optional[dict]:
         with _cache_lock:
             cached = _cache.get(resume_id)
         if cached:
+            _apply_source_skills(cached)
             return cached
     row = get_store().first("resumes", {"id": resume_id})
     if not row:
@@ -481,7 +497,7 @@ def get_resume(resume_id: str, force_fresh: bool = False) -> Optional[dict]:
 def list_resumes() -> list[dict]:
     rows: list[dict] = []
     page, offset = 500, 0
-    cols = ["id", "filename", "parsed", "report", "error", "created_at", "file_hash"]
+    cols = ["id", "filename", "text_content", "parsed", "report", "error", "created_at", "file_hash"]
     store = get_store()
     while True:
         batch = store.select("resumes", columns=cols, order="created_at desc", limit=page, offset=offset)
@@ -492,7 +508,7 @@ def list_resumes() -> list[dict]:
     out = []
     for row in rows:
         try:
-            out.append(_map_row(row))
+            out.append(_map_row(row, include_original_text=False))
         except Exception as err:
             log.warning("Skipping corrupt resume row %s: %s", row.get("id"), err)
     return out

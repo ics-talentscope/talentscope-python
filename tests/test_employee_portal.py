@@ -1,6 +1,7 @@
 import pytest
 
 from core.tokens import sign_token
+from services import portal_roster
 
 EMP = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
@@ -38,6 +39,20 @@ def test_ai_quiz_creates_resumes_and_resets(client, auth, store):
 def test_ai_quiz_blocked_for_assessment_only(client, auth, store):
     store.update("employees", {"assessment_only": True}, {"employee_id": "EMP1"})
     assert client.post("/api/employee/learning/ai-fundamentals/ai-quiz", headers=auth).status_code == 403
+    assert client.get("/api/employee/learning/ai-intro-history/source", headers=auth).status_code == 403
+
+
+def test_topic_source_guide(client, auth):
+    res = client.get("/api/employee/learning/ai-intro-history/source", headers=auth)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["topic_title"] == "History of AI"
+    assert data["word_count"] >= 300
+    assert len(data["sources"]) == 2
+    assert any(s["name"] == "GeeksforGeeks" for s in data["sources"])
+    assert any(s["name"] == "Wikipedia" for s in data["sources"])
+    assert len(data["key_points"]) >= 4
+    assert "Turing" in data["explanation"]
 
 
 def test_assigned_test_states(client, auth, store):
@@ -50,6 +65,7 @@ def test_assigned_test_states(client, auth, store):
                           "completed_at": "2026-09-01T00:00:00Z"}])
     res = client.get("/api/employee/assigned-test", headers=auth).json()
     assert res["active_test"]["test_id"] == "t1" and res["completed_test"]["score_percent"] == 80 and res["completed_test"]["recording_missing"] is True
+    assert res["completed_test"]["topic_title"] == "Prod"
 
 
 def test_results_and_analytics(client, auth, store):
@@ -64,7 +80,74 @@ def test_results_and_analytics(client, auth, store):
     assert [r["accuracy_pct"] for r in results] == [60, 80]
     assert client.get("/api/employee/results?employee_id=OTHER", headers=auth).status_code == 403
     data = client.get("/api/employee/analytics", headers=auth).json()
-    assert data["total_tests_taken"] == 2 and data["total_learning_hours"] == 1 and data["average_score"] == 100
+    assert data["total_tests_taken"] == 2 and data["total_learning_hours"] == 1 and data["average_score"] == 70
     assert [h["score"] for h in data["score_history"]] == [80, 60]
-    assert len(data["weekly_activity"]) == 2 and data["skill_level"] == "advanced"
-    assert data["strongest_subject"] is None
+    assert len(data["weekly_activity"]) == 2 and data["skill_level"] == "intermediate"
+    assert data["strongest_subject"]["subject_title"] == "Topic 0"
+
+
+def test_archived_assessments_are_visible_but_only_completed_scores_are_averaged(client, auth, store):
+    history_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1"
+    incomplete_history_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2"
+    current_id = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb3"
+    store.seed("tests", [
+        {"id": history_id, "employee_id": EMP, "employee_code": "EMP1",
+         "topic_id": "resource-product-assessment-history:old", "subject_id": "resource-subject",
+         "topic_title": "TPM Upskilling (previous)", "subject_title": "Product Assessment", "difficulty": "medium",
+         "total_questions": 25, "status": "completed", "score_correct": 20, "score_percent": 80,
+         "completed_at": "2026-09-01T10:00:00Z"},
+        {"id": incomplete_history_id, "employee_id": EMP, "employee_code": "EMP1",
+         "topic_id": "resource-product-assessment-history:incomplete", "subject_id": "resource-subject",
+         "topic_title": "TPM Upskilling (previous)", "subject_title": "Product Assessment", "difficulty": "medium",
+         "total_questions": 25, "status": "pending", "created_at": "2026-08-01T10:00:00Z"},
+        {"id": current_id, "employee_id": EMP, "employee_code": "EMP1",
+         "topic_id": "resource-product-assessment", "subject_id": "resource-subject",
+         "topic_title": "CSD", "subject_title": "Product Assessment", "difficulty": "medium",
+         "total_questions": 25, "status": "pending"},
+    ])
+
+    results = client.get("/api/employee/results", headers=auth).json()
+    assert {result["id"] for result in results} == {history_id, incomplete_history_id}
+    completed_history = next(result for result in results if result["id"] == history_id)
+    assert completed_history["topic_title"] == "TPM Upskilling"
+    incomplete = next(result for result in results if result["id"] == incomplete_history_id)
+    assert incomplete["is_history"] is True
+    assert incomplete["status"] == "pending"
+    assert incomplete["accuracy_pct"] is None
+
+    analytics = client.get("/api/employee/analytics", headers=auth).json()
+    assert analytics["total_tests_taken"] == 1
+    assert analytics["average_score"] == 80
+
+    store.update("tests", {
+        "status": "completed", "score_correct": 15, "score_percent": 60,
+        "completed_at": "2026-10-01T10:00:00Z",
+    }, {"id": current_id})
+    analytics = client.get("/api/employee/analytics", headers=auth).json()
+    assert analytics["total_tests_taken"] == 2
+    assert analytics["average_score"] == 70
+
+
+def test_admin_portal_keeps_history_in_employee_test_list():
+    profile = [{
+        "employee_id": "EMP1", "full_name": "E", "role": "employee", "product": "CSD",
+        "emp_status": "Confirmed", "remarks": "", "assigned_questions": [], "assigned_question_count": 25,
+    }]
+    results = [
+        {"id": "current", "employeeId": "EMP1", "topicId": "resource-product-assessment", "status": "pending",
+         "totalQuestions": 25, "answeredCount": 0, "createdAt": "2026-10-01T10:00:00Z"},
+        {"id": "history", "employeeId": "EMP1", "topicId": "resource-product-assessment-history:old",
+         "topicTitle": "TPM Upskilling (previous)", "status": "completed", "score": 20, "correctCount": 20,
+         "totalQuestions": 25, "answeredCount": 25, "createdAt": "2026-09-01T10:00:00Z",
+         "completedAt": "2026-09-01T10:00:00Z"},
+    ]
+
+    employee = portal_roster.merge_portal_data(profile, results, {})[0]
+    assert employee["test_id"] == "current"
+    assert [test["id"] for test in employee["tests"]] == ["history", "current"]
+    history = employee["tests"][0]
+    assert history["topicTitle"] == "TPM Upskilling"
+    assert history["status"] == "completed"
+    # topicId lets the admin UI exclude archived attempts from single-test reset selection.
+    assert history["topicId"] == "resource-product-assessment-history:old"
+    assert employee["tests"][1]["topicId"] == "resource-product-assessment"

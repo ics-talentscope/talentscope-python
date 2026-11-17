@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Iterable
 
 from services import dashboard_sync, settings
@@ -8,6 +9,12 @@ ROSTER_KEY = "corp_pool_roster"
 DELETED_KEY = "deleted_corp_pool"
 
 
+def normalize_employee_id(value: object) -> str:
+    ident = str(value or "").strip()
+    ident = re.sub(r"^(\d+)\.0+$", r"\1", ident)
+    return ident.casefold()
+
+
 def _as_list(raw) -> list[dict]:
     rows = raw if isinstance(raw, list) else (raw.get("employees") if isinstance(raw, dict) and isinstance(raw.get("employees"), list) else [])
     seen, out = set(), []
@@ -15,9 +22,10 @@ def _as_list(raw) -> list[dict]:
         if not isinstance(row, dict):
             continue
         ident = str(row.get("employee_id") or "").strip()
-        if not ident or ident in seen:
+        normalized = normalize_employee_id(ident)
+        if not normalized or normalized in seen:
             continue
-        seen.add(ident)
+        seen.add(normalized)
         out.append({**row, "employee_id": ident})
     return out
 

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -23,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from openpyxl import load_workbook
 
 from core.config import mssql_settings
-from core.db import MssqlStore, set_store
+from core.db import MssqlStore, Store, set_store
 from services import accounts
 
 PRODUCT = "TPM Upskilling"
@@ -80,6 +81,20 @@ def load_mcqs(path: Path) -> list[dict]:
     return out
 
 
+def unique_questions(mcqs: list[dict], existing_questions: list[dict] | None = None) -> list[dict]:
+    known_texts = {
+        re.sub(r"\s+", " ", str(row.get("question_text") or "")).strip().casefold()
+        for row in (existing_questions or [])
+    }
+    questions_to_add = []
+    for question in mcqs:
+        key = re.sub(r"\s+", " ", str(question["question_text"])).strip().casefold()
+        if key and key not in known_texts:
+            known_texts.add(key)
+            questions_to_add.append(question)
+    return questions_to_add
+
+
 def ensure_account(row: dict) -> dict:
     existing = accounts.get_account(row["employee_id"])
     pwd_hash = existing.get("password_hash") if existing else None
@@ -116,7 +131,9 @@ def ensure_account(row: dict) -> dict:
     return saved
 
 
-def assign_assessment(store: MssqlStore, account: dict, mcqs: list[dict]) -> str:
+def assign_assessment(store: Store, account: dict, mcqs: list[dict]) -> str:
+    if not mcqs:
+        raise ValueError("At least one MCQ is required to assign an assessment")
     emp_uuid = accounts.employee_uuid(account["employee_id"])
     if not emp_uuid:
         raise RuntimeError(f"No UUID for {account['employee_id']}")
@@ -124,38 +141,29 @@ def assign_assessment(store: MssqlStore, account: dict, mcqs: list[dict]) -> str
     existing = store.first(
         "tests",
         {"employee_id": emp_uuid, "topic_id": TOPIC_ID},
-        ["id", "topic_title", "status", "total_questions"],
+        ["id", "status", "total_questions"],
     )
     now = datetime.now(timezone.utc).isoformat()
     if existing:
         test_id = existing["id"]
-        store.execute("DELETE FROM dbo.test_attempts WHERE test_id = ?", (test_id,))
-        store.execute("DELETE FROM dbo.test_questions WHERE test_id = ?", (test_id,))
-        store.update(
-            "tests",
-            {
-                "employee_code": account["employee_id"],
-                "topic_title": PRODUCT,
-                "subject_id": SUBJECT_ID,
-                "subject_title": SUBJECT_TITLE,
-                "difficulty": "medium",
-                "total_questions": len(mcqs),
-                "time_limit_seconds": TIME_LIMIT_SECONDS,
-                "status": "pending",
-                "current_question_index": 0,
-                "started_at": None,
-                "completed_at": None,
-                "in_progress": None,
-                "session_recording_url": None,
-                "proctoring": None,
-                "score_correct": None,
-                "score_total": None,
-                "score_percent": None,
-                "ai_analysis": None,
-            },
-            {"id": test_id},
+        if str(existing.get("status") or "").lower() != "pending":
+            return f"existing:{test_id}"
+        if store.count("test_attempts", {"test_id": test_id}) > 0:
+            return f"existing:{test_id}"
+
+        existing_questions = store.select(
+            "test_questions",
+            {"test_id": test_id},
+            ["question_index", "question_text"],
         )
-        action = "replaced"
+        questions_to_add = unique_questions(mcqs, existing_questions)
+        if not questions_to_add:
+            return f"existing:{test_id}"
+        first_question_index = max(
+            (int(row["question_index"]) for row in existing_questions if row.get("question_index") is not None),
+            default=-1,
+        ) + 1
+        action = "supplemented"
     else:
         test_id = str(uuid.uuid4())
         store.insert(
@@ -176,15 +184,18 @@ def assign_assessment(store: MssqlStore, account: dict, mcqs: list[dict]) -> str
                 "created_at": now,
             },
         )
+        existing_questions = []
+        questions_to_add = unique_questions(mcqs)
+        first_question_index = 0
         action = "created"
 
-    for idx, q in enumerate(mcqs):
+    for offset, q in enumerate(questions_to_add):
         store.insert(
             "test_questions",
             {
                 "id": str(uuid.uuid4()),
                 "test_id": test_id,
-                "question_index": idx,
+                "question_index": first_question_index + offset,
                 "question_text": q["question_text"],
                 "options": q["options"],
                 "correct_option_index": q["correct_option_index"],
@@ -194,6 +205,12 @@ def assign_assessment(store: MssqlStore, account: dict, mcqs: list[dict]) -> str
                 "topic_title": PRODUCT,
                 "created_at": now,
             },
+        )
+    if existing:
+        store.update(
+            "tests",
+            {"total_questions": len(existing_questions) + len(questions_to_add)},
+            {"id": test_id},
         )
     return f"{action}:{test_id}"
 

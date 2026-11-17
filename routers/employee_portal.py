@@ -6,7 +6,7 @@ from fastapi import APIRouter, Body, Depends, Request
 from core.auth import employee_id_from_request, require_employee
 from core.db import get_store
 from core.errors import json_error, public_error
-from services import accounts, employee_tests as et, portal, question_bank, test_video
+from services import accounts, employee_tests as et, portal, question_bank, test_video, topic_sources
 from services.portal import js_round
 from services.products import format_topic_title_for_display
 
@@ -39,7 +39,7 @@ def catalog(request: Request):
 def subjects(employee: dict = Depends(require_employee)):
     try:
         topics = portal.learning_topics_for_employee(employee)
-        if accounts.is_product_qb_employee(employee):
+        if accounts.is_product_qb_employee(employee) and not accounts.is_ai_questionnaire_employee(employee):
             emp_uuid = accounts.employee_uuid(employee["employee_id"])
             test = get_store().first("tests", {"employee_id": emp_uuid, "topic_id": accounts.PRODUCT_ASSESSMENT_TOPIC_ID}, ["id"]) if emp_uuid else None
             if test:
@@ -54,7 +54,7 @@ def subjects(employee: dict = Depends(require_employee)):
 @router.get("/assigned-test")
 def assigned_test(employee: dict = Depends(require_employee)):
     try:
-        if not accounts.is_product_qb_employee(employee):
+        if not accounts.is_product_qb_employee(employee) or accounts.is_ai_questionnaire_employee(employee):
             return {"active_test": None, "completed_test": None}
         emp_uuid = accounts.employee_uuid(employee["employee_id"])
         if not emp_uuid:
@@ -95,15 +95,17 @@ def assigned_test(employee: dict = Depends(require_employee)):
         return public_error(err, "Internal error")
 
 
-def _result_item(test: dict, topic_titles: dict, subject_titles: dict, correct: int) -> dict:
+def _result_item(test: dict, topic_titles: dict, subject_titles: dict, correct: int | None) -> dict:
     total = test.get("total_questions") or 25
     percent = test.get("score_percent")
+    accuracy = percent if percent is not None else (js_round(correct / total * 100) if correct is not None and total > 0 else None)
     return {
         "id": test["id"], "topic_id": test["topic_id"],
         "topic_title": format_topic_title_for_display(topic_titles.get(test["topic_id"]) or test.get("topic_title") or test["topic_id"]),
         "subject_id": test["subject_id"], "subject_title": subject_titles.get(test["subject_id"]) or test.get("subject_title") or test["subject_id"],
         "difficulty": test.get("difficulty"), "total_questions": test.get("total_questions"), "correct_answers": correct,
-        "accuracy_pct": percent if percent is not None else (js_round(correct / total * 100) if total > 0 else 0),
+        "accuracy_pct": accuracy, "status": test.get("status"),
+        "is_history": accounts.is_product_assessment_history_topic(test.get("topic_id")),
         "time_taken_seconds": 0, "started_at": test.get("started_at"), "completed_at": test.get("completed_at") or "",
         "topic_breakdown": [],
         "ai_analysis": test.get("ai_analysis") if isinstance(test.get("ai_analysis"), str) else (test.get("in_progress") if isinstance(test.get("in_progress"), str) else ""),
@@ -121,9 +123,10 @@ def results(request: Request, employee: dict = Depends(require_employee)):
         if not emp_uuid:
             return []
         store = get_store()
-        tests = store.select("tests", {"employee_id": emp_uuid, "status": "completed"},
+        tests = store.select("tests", {"employee_id": emp_uuid},
                              ["id", "topic_id", "subject_id", "difficulty", "total_questions", "started_at", "completed_at", "in_progress",
-                              "score_correct", "score_percent", "ai_analysis", "topic_title", "subject_title"], "completed_at desc")
+                              "score_correct", "score_percent", "ai_analysis", "topic_title", "subject_title", "status"], "completed_at desc")
+        tests = [t for t in tests if t.get("status") == "completed" or accounts.is_product_assessment_history_topic(t.get("topic_id"))]
         if not tests:
             return []
         topic_titles = {r["id"]: r["title"] for r in store.select("learning_topics", {"id": list({t["topic_id"] for t in tests if _is_uuid(t["topic_id"])})}, ["id", "title"])}
@@ -132,8 +135,12 @@ def results(request: Request, employee: dict = Depends(require_employee)):
         correct_by_test: dict = {}
         for a in attempts:
             correct_by_test[a["test_id"]] = correct_by_test.get(a["test_id"], 0) + (1 if a["is_correct"] else 0)
-        return [_result_item(t, topic_titles, subject_titles,
-                             t["score_correct"] if t.get("score_correct") is not None else correct_by_test.get(t["id"], 0)) for t in tests]
+        return [_result_item(
+            t, topic_titles, subject_titles,
+            t["score_correct"] if t.get("score_correct") is not None
+            else correct_by_test.get(t["id"], 0) if t.get("status") == "completed" or t["id"] in correct_by_test
+            else None,
+        ) for t in tests]
     except Exception as err:
         return public_error(err, "Failed to load results")
 
@@ -157,10 +164,43 @@ def analytics(employee: dict = Depends(require_employee)):
         done_ids = {t["id"] for t in completed}
         attempts = [a for a in store.select("test_attempts", {"employee_id": uid}, ["test_id", "is_correct"]) if a["test_id"] in done_ids]
         correct_total = sum(1 for a in attempts if a["is_correct"])
-        average = js_round(correct_total / len(attempts) * 100) if total_tests > 0 and attempts else 0
+        # Prefer stored test scores. Auto-submit / partial attempt rows can make
+        # correct/attempts look like 100% while score_percent is e.g. 3/25 = 12%.
+        stored_scores: list[float] = []
+        for t in completed:
+            if t.get("score_percent") is not None:
+                try:
+                    stored_scores.append(float(t["score_percent"]))
+                    continue
+                except (TypeError, ValueError):
+                    pass
+            total_q = int(t.get("total_questions") or 0)
+            if t.get("score_correct") is not None and total_q > 0:
+                try:
+                    stored_scores.append(100.0 * float(t["score_correct"]) / total_q)
+                except (TypeError, ValueError):
+                    pass
+        if stored_scores:
+            average = js_round(sum(stored_scores) / len(stored_scores))
+        else:
+            average = js_round(correct_total / len(attempts) * 100) if total_tests > 0 and attempts else 0
         hours = js_round(sum((t.get("total_questions") or 0) * 2 for t in completed) / 60)
 
         def stats(test_ids: set) -> tuple[int, int]:
+            # Prefer scored test rows over sparse attempt logs for the same reason as average.
+            scored = [t for t in completed if t["id"] in test_ids]
+            if scored and any(t.get("score_percent") is not None or t.get("score_correct") is not None for t in scored):
+                correct = 0
+                total = 0
+                for t in scored:
+                    total_q = int(t.get("total_questions") or 0) or 25
+                    if t.get("score_correct") is not None:
+                        correct += int(t["score_correct"] or 0)
+                        total += total_q
+                    elif t.get("score_percent") is not None:
+                        correct += int(round(float(t["score_percent"]) * total_q / 100.0))
+                        total += total_q
+                return correct, total
             rel = [a for a in attempts if a["test_id"] in test_ids]
             return sum(1 for a in rel if a["is_correct"]), len(rel)
 
@@ -174,6 +214,34 @@ def analytics(employee: dict = Depends(require_employee)):
             pct = js_round(correct / count * 100) if count else 0
             breakdown.append({"subject_id": subject["id"], "subject_title": subject["title"], "average_pct": pct,
                               "mastery_pct": len(mine) if pct >= 80 else 0, "topic_count": len(mine)})
+
+        # Product assessments use subject_id like "resource-subject" (not in learning_subjects).
+        # Surface them so Strongest/Weakest and readiness subject avg aren't empty.
+        if not any((s.get("topic_count") or 0) > 0 for s in breakdown):
+            by_title: dict = {}
+            for t in completed:
+                title = (t.get("topic_title") or t.get("subject_title") or "Product Assessment").strip() or "Product Assessment"
+                by_title.setdefault(title, []).append(t)
+            for title, mine in by_title.items():
+                correct, count = stats({t["id"] for t in mine})
+                pct = js_round(correct / count * 100) if count else 0
+                if pct == 0 and mine:
+                    # Fall back to stored score_percent average for this product group.
+                    vals = []
+                    for t in mine:
+                        if t.get("score_percent") is not None:
+                            vals.append(float(t["score_percent"]))
+                        elif t.get("score_correct") is not None and (t.get("total_questions") or 0) > 0:
+                            vals.append(100.0 * float(t["score_correct"]) / float(t["total_questions"]))
+                    if vals:
+                        pct = js_round(sum(vals) / len(vals))
+                breakdown.append({
+                    "subject_id": f"product:{title}",
+                    "subject_title": title,
+                    "average_pct": pct,
+                    "mastery_pct": len(mine) if pct >= 80 else 0,
+                    "topic_count": len(mine),
+                })
 
         weeks: dict = {}
         for t in completed:
@@ -208,6 +276,8 @@ def analytics(employee: dict = Depends(require_employee)):
         return {
             "total_tests_taken": total_tests, "average_score": average, "total_learning_hours": hours,
             "ai_readiness_score": readiness, "skill_level": portal.skill_level(readiness),
+            # Keep XP aligned with readiness for assessment-only dashboards (was falling back in UI).
+            "xp_points": readiness,
             "strongest_subject": pick(ranked[0]) if ranked and ranked[0]["topic_count"] > 0 else None,
             "weakest_subject": pick(ranked[-1]) if ranked and ranked[-1]["topic_count"] > 0 else None,
             "score_history": [{"date": r["completed_at"], "score": r["accuracy_pct"]} for r in recent_results],
@@ -233,6 +303,31 @@ def _resolve_topic(topic_id: str, difficulty: str) -> dict:
             "difficulty": static["difficulty"]}
 
 
+@router.get("/learning/{topic_id}/source")
+def topic_source(topic_id: str, employee: dict = Depends(require_employee)):
+    try:
+        if accounts.is_assessment_only_employee(employee):
+            return json_error(403, "Other learning tests are disabled. Please take your assigned product assessment only.")
+        source_data = topic_sources.get_topic_source(topic_id)
+        try:
+            info = _resolve_topic(topic_id, source_data.get("difficulty", "intermediate"))
+            if info:
+                title = info.get("topic_title") or source_data.get("topic_title") or topic_id
+                source_data = {
+                    **source_data,
+                    "topic_title": topic_sources.format_title_case(title),
+                    "subject_title": topic_sources.format_title_case(info.get("subject_title") or source_data.get("subject_title")),
+                    "subject_id": info.get("subject_id") or source_data.get("subject_id"),
+                    "difficulty": info.get("difficulty") or source_data.get("difficulty"),
+                }
+        except Exception:
+            if source_data.get("topic_title"):
+                source_data["topic_title"] = topic_sources.format_title_case(source_data["topic_title"])
+        return source_data
+    except Exception as err:
+        return public_error(err, "Failed to load topic source material")
+
+
 @router.post("/learning/{topic_id}/ai-quiz")
 def ai_quiz(topic_id: str, body: dict = Body(default_factory=dict), employee: dict = Depends(require_employee)):
     try:
@@ -249,12 +344,16 @@ def ai_quiz(topic_id: str, body: dict = Body(default_factory=dict), employee: di
         store = get_store()
         existing = store.first("tests", {"employee_id": emp_uuid, "topic_id": topic_id}, ["id", "status", "total_questions", "started_at"])
         started_at, resume = _now(), False
-        generated = question_bank.fetch_questions(info["subject_title"], info["topic_title"], info["difficulty"])
-        if existing and existing["status"] in ("in_progress", "pending") and existing.get("total_questions") == 10:
+        existing_questions = store.count("test_questions", {"test_id": existing["id"]}) if existing else 0
+        if (existing and existing["status"] in ("in_progress", "pending")
+                and existing.get("total_questions") == 10 and existing_questions == 10):
             test_id, resume = existing["id"], True
             started_at = existing.get("started_at") or started_at
             store.update("tests", {"difficulty": info["difficulty"], "started_at": started_at}, {"id": test_id})
         else:
+            generated = question_bank.generate_ai_questions(
+                info["subject_title"], info["topic_title"], info["difficulty"]
+            )
             if existing:
                 test_id = existing["id"]
                 store.update("tests", {"status": "pending", "in_progress": None, "current_question_index": 0, "started_at": started_at,

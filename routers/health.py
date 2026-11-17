@@ -30,7 +30,7 @@ def supabase_up() -> bool:
 
 
 def database_report() -> dict:
-    if db_target() == "SUPABASE" or env("DB_PROVIDER").lower() == "supabase":
+    if db_target() == "SUPABASE":
         url = (env("SUPABASE_URL") or env("NEXT_PUBLIC_SUPABASE_URL")).rstrip("/")
         return {"provider": "supabase", "url": url, "up": get_store().ping()}
     settings = mssql_settings()

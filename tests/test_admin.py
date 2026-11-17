@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -9,6 +10,7 @@ RID = "11111111-1111-4111-8111-111111111111"
 
 @pytest.fixture()
 def admin(client, monkeypatch):
+    monkeypatch.setenv("ADMIN_EMAIL", "boss@infinite.com")
     monkeypatch.setenv("ADMIN_PASSWORD", "AdminPw1!")
     token = client.post("/api/admin/auth/login", json={"email": "boss@infinite.com", "password": "AdminPw1!"}).json()["token"]
     return {"Authorization": f"Bearer {token}"}
@@ -72,19 +74,31 @@ def test_reset_clears_candidate_state(client, store, admin):
     assert store.count("interview_attempts") == 0
     assert store.first("candidate_sessions", {"email": "c@x.com"})["used"] is False
     assert store.count("reset_logs") == 1
+    invalid_email = client.post("/api/admin/resumes/reset_by_email", headers=admin, json={"email": "invalid"})
+    assert invalid_email.status_code == 400 and "valid candidate email" in invalid_email.json()["error"]
     assert client.post("/api/admin/resumes/reset_by_email", headers=admin, json={"email": "ghost@x.com"}).status_code == 404
+    missing = client.post("/api/admin/resumes/reset_by_email", headers=admin, json={"email": "ghost@x.com"})
+    assert missing.json()["error"] == "Candidate not found. Check the email address and try again."
     assert client.post("/api/admin/resumes/reset_by_email", headers=admin, json={"email": "c@x.com"}).status_code == 200
 
 
 def test_invite_records_email_and_uses_app_url(client, store, admin, monkeypatch, tmp_path):
     monkeypatch.setattr("services.storage.UPLOAD_DIR", tmp_path)
     monkeypatch.setenv("NEXT_PUBLIC_APP_URL", "http://localhost:3000")
+    for name in ("SMTP_HOST", "SMTP_USER", "SMTP_PASS", "SMTP_FROM"):
+        monkeypatch.delenv(name, raising=False)
     seed(store)
     res = client.post(f"/api/admin/resumes/{RID}/invite", headers=admin,
                       json={"interviewConfig": {"interviewType": "both", "sections": {"overlapping": 1}}}).json()
     assert res["success"] and res["status"] == "simulated" and res["fullName"] == "Cand Idate"
     mail = store.select("simulated_emails")[0]
     assert "http://localhost:3000" in mail["body"] and "vercel.app" not in mail["body"] and "Technical & Behavioral" in mail["subject"]
+    assert ">Start Assessment</a>" in mail["body"] and "Temporary password:" in mail["body"]
+    password = re.search(r"Temporary password: <strong>([^<]+)</strong>", mail["body"]).group(1)
+    assert re.fullmatch(r"[A-Za-z0-9]{12}", password)
+    assert store.first("candidate_sessions", {"email": "c@x.com"})["password_hash"] != password
+    login = client.post("/api/interview/access", json={"email": "c@x.com", "password": password})
+    assert login.status_code == 200 and login.json()["resumeId"] == RID
     assert store.first("candidate_sessions", {"email": "c@x.com"})["used"] is False
     emails = client.get("/api/admin/emails", headers=admin).json()["emails"]
     assert emails[0]["to"] == "c@x.com"
@@ -101,8 +115,54 @@ def test_invite_sends_real_mail_when_smtp_configured(client, store, admin, monke
     seed(store)
     assert client.post(f"/api/admin/resumes/{RID}/invite", headers=admin, json={}).json()["status"] == "sent"
     assert sent == ["c@x.com"]
+    delivered_mail = store.select("simulated_emails")[0]
+    delivered_password = re.search(r"Temporary password: <strong>([^<]+)</strong>", delivered_mail["body"]).group(1)
     monkeypatch.setattr(mailer, "send", lambda *a: (_ for _ in ()).throw(RuntimeError("smtp down")))
-    assert client.post(f"/api/admin/resumes/{RID}/invite", headers=admin, json={}).json()["status"] == "failed_real_fallback_simulated"
+    failed = client.post(f"/api/admin/resumes/{RID}/invite", headers=admin, json={})
+    assert failed.status_code == 503 and failed.json()["status"] == "failed_real_fallback_simulated"
+    assert client.post("/api/interview/access", json={"email": "c@x.com", "password": delivered_password}).status_code == 200
+
+
+def test_reset_candidate_password_requires_sent_invite_and_emails_new_password(client, store, admin, monkeypatch, tmp_path):
+    monkeypatch.setattr("services.storage.UPLOAD_DIR", tmp_path)
+    seed(store)
+    reset_url = f"/api/admin/resumes/{RID}/reset-password"
+    assert client.post(reset_url, headers=admin).status_code == 409
+
+    monkeypatch.setenv("SMTP_USER", "u@x.com")
+    monkeypatch.setenv("SMTP_PASS", "pw")
+    sent = []
+    monkeypatch.setattr(mailer, "send", lambda to, subject, html: sent.append((to, subject, html)))
+    assert client.post(f"/api/admin/resumes/{RID}/invite", headers=admin, json={}).json()["status"] == "sent"
+    previous_mail = store.select("simulated_emails")[0]
+    previous_password = re.search(r"Temporary password: <strong>([^<]+)</strong>", previous_mail["body"]).group(1)
+
+    response = client.post(reset_url, headers=admin)
+    assert response.status_code == 200 and response.json()["status"] == "sent"
+    reset_mail = next(row for row in store.select("simulated_emails") if row["subject"] == "TalentScope — Assessment Password Reset")
+    new_password = re.search(r"Temporary password: <strong>([^<]+)</strong>", reset_mail["body"]).group(1)
+    assert re.fullmatch(r"[A-Za-z0-9]{12}", new_password)
+    assert len(sent) == 2 and sent[-1][0] == "c@x.com"
+    assert client.post("/api/interview/access", json={"email": "c@x.com", "password": previous_password}).status_code == 401
+    assert client.post("/api/interview/access", json={"email": "c@x.com", "password": new_password}).status_code == 200
+
+
+def test_failed_password_reset_email_preserves_existing_password(client, store, admin, monkeypatch):
+    seed(store)
+    previous_password = "OriginalPass123"
+    from services import sessions
+
+    sessions.issue_candidate_password("c@x.com", RID)
+    sessions.save_candidate_password("c@x.com", RID, previous_password)
+    mailer.record("c@x.com", "Cand Idate", "Invitation", "sent invite", "sent", "rm@infinite.com")
+    monkeypatch.setenv("SMTP_USER", "u@x.com")
+    monkeypatch.setenv("SMTP_PASS", "pw")
+    monkeypatch.setattr(mailer, "send", lambda *a: (_ for _ in ()).throw(RuntimeError("smtp down")))
+
+    response = client.post(f"/api/admin/resumes/{RID}/reset-password", headers=admin)
+    assert response.status_code == 503
+    login = client.post("/api/interview/access", json={"email": "c@x.com", "password": previous_password})
+    assert login.status_code == 200
 
 
 def test_portal_settings_sync_and_logs(client, store, admin, monkeypatch, tmp_path):
@@ -117,7 +177,10 @@ def test_portal_settings_sync_and_logs(client, store, admin, monkeypatch, tmp_pa
     assert logs[0]["action"] == "UPDATE_PORTAL_SETTINGS"
     assert client.get("/api/admin/logs?module=employee&download=true", headers=admin).status_code == 200
     assert client.delete("/api/admin/logs", headers=admin).json() == {"success": True}
-    assert client.get("/api/admin/logs", headers=admin).json()["logs"] == []
+    cleared_logs = client.get("/api/admin/logs", headers=admin).json()["logs"]
+    actions = {entry["action"] for entry in cleared_logs}
+    assert "UPDATE_PORTAL_SETTINGS" not in actions
+    assert "CLEAR_SYSTEM_LOGS" in actions
 
 
 def test_admin_employee_test_attempts_and_video(client, store, admin, monkeypatch, tmp_path):
@@ -129,7 +192,8 @@ def test_admin_employee_test_attempts_and_video(client, store, admin, monkeypatc
     store.seed("test_attempts", [{"id": "a", "test_id": tid, "question_id": q0, "selected_option_index": 1, "is_correct": True}])
     res = client.get(f"/api/admin/employee-tests/{tid}/attempts", headers=admin).json()
     assert [q["question_text"] for q in res["questions"]] == ["A?", "B?"]
-    assert res["questions"][0]["selected_option_text"] == "B) y" and res["questions"][1]["selected_option_text"] is None
+    assert res["questions"][0]["selected_option_text"] == "B) y"
+    assert res["questions"][1]["selected_option_text"] is None
     assert client.get("/api/admin/employee-tests/cccccccc-cccc-4ccc-8ccc-cccccccccc99/attempts", headers=admin).status_code == 404
     assert client.get(f"/api/admin/employee-tests/{tid}/video", headers=admin).status_code == 404
     from services import test_video

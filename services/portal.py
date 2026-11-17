@@ -34,8 +34,8 @@ def _blocked(subject: dict) -> bool:
 
 def learning_topics_for_employee(employee: dict) -> list[dict]:
     topics = [dict(s) for s in _static()["subjects"]]
-    if accounts.is_product_qb_employee(employee):
-        product = employee.get("product")
+    product = str(employee.get("product") or "").strip()
+    if accounts.is_product_qb_employee(employee) and product and not accounts.is_ai_questionnaire_employee(employee):
         topics.insert(0, {
             "id": accounts.PRODUCT_ASSESSMENT_TOPIC_ID,
             "title": f"{format_product_display_name(product)} Question Bank" if product else "Product Question Bank",

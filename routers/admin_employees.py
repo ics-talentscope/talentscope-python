@@ -2,14 +2,18 @@ import csv
 import io
 import logging
 from typing import Optional
+from urllib.parse import urlsplit
 
+import httpx
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import Response
 
 from core.auth import acting_admin_email, require_any_permission, require_permission
+from core.config import env
 from core.db import get_store
 from core.errors import json_error, public_error
-from services import admin_accounts, corp_pool, docs_storage, portal_roster as pr, test_video
+from services import admin_accounts, corp_pool, docs_storage, employee_portal_admin as portal_admin
+from services import portal_roster as pr, test_video
 from services import employee_tests as et
 from services.products import format_topic_title_for_display
 from services.structured_log import write_log
@@ -22,7 +26,7 @@ router = APIRouter(
 )
 
 TEST_COLUMNS = ["id", "employee_id", "employee_code", "status", "topic_id", "subject_id", "difficulty", "total_questions", "score_correct",
-                "score_total", "score_percent", "session_recording_url", "proctoring", "started_at", "completed_at", "topic_title", "subject_title"]
+                "score_total", "score_percent", "session_recording_url", "proctoring", "started_at", "completed_at", "created_at", "topic_title", "subject_title"]
 EDITABLE = ("full_name", "email", "department", "skills", "designation", "grade", "status", "product")
 
 
@@ -57,7 +61,8 @@ def _test_results(store) -> list[dict]:
             "subjectTitle": test.get("subject_title") or "Unknown Subject", "difficulty": test.get("difficulty") or "medium",
             "totalQuestions": total, "status": test.get("status"), "answeredCount": 0, "correctCount": correct, "score": correct,
             "scorePercent": percent, "videoUrl": test.get("session_recording_url"), "proctoring": et.normalize_proctoring(test.get("proctoring")),
-            "startedAt": test.get("started_at"), "completedAt": test.get("completed_at"), "hasRecording": test["id"] in recordings,
+            "startedAt": test.get("started_at"), "completedAt": test.get("completed_at"), "createdAt": test.get("created_at"),
+            "hasRecording": test["id"] in recordings,
         })
     attempts = store.select("test_attempts", columns=["test_id"])
     counts: dict = {}
@@ -83,18 +88,27 @@ def _apply_jd_match(roster: list[dict], jd_id) -> list[dict]:
         return roster
     from services import skill_match
 
-    try:
-        jd = get_store().first("job_descriptions", {"id": jd_id}, ["jd_text"])
-        if not jd or not (jd.get("jd_text") or "").strip():
-            return roster
-        results = skill_match.score_people(jd["jd_text"], roster)
-    except Exception as err:
-        log.warning("Failed to recalculate employee skill match: %s", err)
-        return roster
+    jd = get_store().first("job_descriptions", {"id": jd_id}, ["jd_text"])
+    if not jd or not (jd.get("jd_text") or "").strip():
+        raise ValueError(f"Selected JD/BR {jd_id} was not found or has no text to score against.")
+    results = skill_match.score_people(jd["jd_text"], roster)
     out = []
     for emp, res in zip(roster, results):
         override = emp.get("score_override") if emp.get("score_override_jd_id") == jd_id and isinstance(emp.get("score_override"), (int, float)) else None
-        out.append({**emp, "score": override if override is not None else res["score"], "matchingSkills": res.get("matchingSkills") or []})
+        score = (
+            override
+            if override is not None and res.get("strictRequirementsPassed") is True
+            else min(override, res["score"])
+            if override is not None
+            else res["score"]
+        )
+        out.append({
+            **emp,
+            "score": score,
+            "matchingSkills": res.get("matchingSkills") or [],
+            "matchDecision": res.get("decision"),
+            "matchRationale": res.get("rationale") or "",
+        })
     return out
 
 
@@ -165,37 +179,34 @@ def shortlist(body: dict = Body(default_factory=dict)):
 @router.patch("")
 def update_employee(body: dict = Body(default_factory=dict)):
     employee_id = str(body.get("employeeId") or "").strip()
+    normalized_employee_id = corp_pool.normalize_employee_id(employee_id)
     updates = body.get("updates") if isinstance(body.get("updates"), dict) else {}
-    if not employee_id:
+    if not normalized_employee_id:
         return json_error(400, "Employee ID is required")
+    if {"score", "score_override", "score_override_jd_id"}.intersection(updates):
+        return json_error(400, "Score is calculated automatically and cannot be edited.")
     try:
         roster = corp_pool.load_roster()
         if not roster:
             return json_error(404, "Employees not loaded")
-        matched = next((e for e in roster if e["employee_id"] == employee_id), None)
+        matched = next(
+            (e for e in roster if corp_pool.normalize_employee_id(e["employee_id"]) == normalized_employee_id),
+            None,
+        )
         if not matched:
             return json_error(404, "Employee not found")
         next_id = str(updates.get("employee_id", matched["employee_id"]) or "").strip()
-        if not next_id:
+        normalized_next_id = corp_pool.normalize_employee_id(next_id)
+        if not normalized_next_id:
             return json_error(400, "Employee ID cannot be empty.")
-        if next_id != employee_id and any(e["employee_id"] == next_id for e in roster):
+        if normalized_next_id != normalized_employee_id and any(
+            corp_pool.normalize_employee_id(e["employee_id"]) == normalized_next_id
+            for e in roster
+        ):
             return json_error(409, f"Employee ID {next_id} already exists.")
         for field in EDITABLE:
             if field in updates:
                 matched[field] = "" if updates[field] is None else str(updates[field])
-        if "score" in updates or "score_override" in updates:
-            raw = updates["score_override"] if "score_override" in updates else updates["score"]
-            try:
-                value = float(raw)
-            except (TypeError, ValueError):
-                return json_error(400, "Score must be a number.")
-            if value != value or value in (float("inf"), float("-inf")):
-                return json_error(400, "Score must be a number.")
-            clamped = max(0, min(100, _round(value)))
-            matched["score"] = clamped
-            matched["score_override"] = clamped
-            if "score_override_jd_id" in updates:
-                matched["score_override_jd_id"] = str(updates["score_override_jd_id"] or "").strip() or None
         matched["employee_id"] = next_id
         matched["manually_edited"] = True
         corp_pool.save_roster(roster)
@@ -241,6 +252,33 @@ def delete_employees(body: dict = Body(default_factory=dict)):
     except Exception as err:
         write_log("employee", "DELETE_EMPLOYEE_FAILED", "failed", "Failed to delete employees")
         return public_error(err, "Failed to delete employees")
+
+
+@router.delete("/portal")
+def delete_portal_employee_accounts(
+    request: Request,
+    body: dict = Body(default_factory=dict),
+    _employee_portal_permission: None = Depends(require_permission("employeePortal")),
+):
+    employee_ids = body.get("employeeIds", body.get("ids"))
+    if not isinstance(employee_ids, list) or not employee_ids:
+        return json_error(400, "Employee IDs are required.")
+    try:
+        deleted = portal_admin.delete_portal_employees(employee_ids)
+    except ValueError as err:
+        return json_error(400, str(err))
+    except LookupError as err:
+        return json_error(404, str(err))
+    except Exception as err:
+        log.exception("Failed to delete employee portal accounts")
+        write_log("employee", "DELETE_EMPLOYEE_PORTAL_FAILED", "failed",
+                  "Failed to delete employee portal accounts")
+        return public_error(err, "Failed to delete employee portal accounts.")
+    write_log(
+        "employee", "DELETE_EMPLOYEE_PORTAL", "success",
+        f"Permanently deleted {deleted} employee portal account(s), assessments, answers, and stored videos.",
+    )
+    return {"success": True, "deleted": deleted}
 
 
 @router.get("/mapping-questions")
@@ -392,7 +430,7 @@ def dispatch_mail(request: Request, body: dict = Body(default_factory=dict)):
                                  "overallScore": score, "atsScore": score, "technicalScore": score, "jdMatchScore": score},
                     "enhanced": None, "report": {"rmEmail": requester, "verification": None}, "error": None,
                     "fileHash": f"emp_{emp['employee_id']}_hash", "fileBase64": None})
-                sessions.create_candidate_session(emp["email"], resume_id)
+                candidate_password = sessions.issue_candidate_password(emp["email"], resume_id)
             if portal_mode:
                 from services.portal_invite_mail import build_portal_invite_html
 
@@ -408,12 +446,14 @@ def dispatch_mail(request: Request, body: dict = Body(default_factory=dict)):
             else:
                 subject = "Assessment Invitation - TalentScope"
                 hint = f"Login email address: <strong>{escape(emp['email'])}</strong>"
-                html = build_invite_html(emp["full_name"], hint, portal_url, "technical")
-            status, _ = mailer.dispatch(emp["email"], subject, html)
+                html = build_invite_html(
+                    emp["full_name"], hint, portal_url, "technical", candidate_password,
+                )
+            status, send_error = mailer.dispatch(emp["email"], subject, html)
             mailer.record(emp["email"], emp["full_name"], subject, html, status, requester)
             audit.add_log(requester, "ADMIN_INVITE_PORTAL_EMPLOYEE" if portal_mode else "ADMIN_INVITE_EMPLOYEE", emp["email"],
                           f"Dispatched {'employee portal' if portal_mode else 'internal'} assessment invite to {emp['full_name']} ({emp['employee_id']}). Status: {status}.", ip)
-            dispatched.append({"email": emp["email"], "name": emp["full_name"], "status": status})
+            dispatched.append({"email": emp["email"], "name": emp["full_name"], "status": status, "error": send_error})
         write_log("employee", "DISPATCH_PORTAL_EMPLOYEE_MAILS" if portal_mode else "DISPATCH_EMPLOYEE_MAILS", "success",
                   f"Successfully dispatched assessment invitations to {len(dispatched)} employees.")
         bump_sync("dispatch_mail")
@@ -503,6 +543,46 @@ def _xlsx(data: bytes, name: str) -> Response:
     return Response(data, media_type=XLSX_MIME, headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
+def _production_portal_export(request: Request, export_name: str) -> Optional[Response]:
+    base_url = env("PORTAL_EXPORT_API_URL").rstrip("/")
+    if not base_url:
+        if env("PORTAL_EXPORT_REQUIRE_PRODUCTION").lower() in {"1", "true", "yes", "on"}:
+            log.error("PORTAL_EXPORT_API_URL is required for development portal exports")
+            return json_error(503, "Production portal exports are not configured.")
+        return None
+    parsed = urlsplit(base_url)
+    if parsed.scheme != "https" or not parsed.netloc or parsed.username or parsed.password or parsed.query or parsed.fragment:
+        log.error("PORTAL_EXPORT_API_URL must be an HTTPS URL without credentials, query, or fragment")
+        return json_error(503, "Production portal exports are not configured correctly.")
+    if parsed.hostname and parsed.hostname.casefold() == (request.url.hostname or "").casefold():
+        log.error("PORTAL_EXPORT_API_URL points back to the current API host")
+        return json_error(503, "Production portal exports are not configured correctly.")
+
+    authorization = request.headers.get("authorization")
+    if not authorization:
+        return json_error(401, "Unauthorized")
+
+    try:
+        with httpx.Client(timeout=60, follow_redirects=False) as client:
+            upstream = client.get(
+                f"{base_url}/api/admin/employees/{export_name}",
+                headers={"Authorization": authorization},
+            )
+    except httpx.HTTPError as err:
+        log.error("Production portal export request failed for %s: %s", export_name, err)
+        return json_error(502, "Production portal export is unavailable.")
+
+    if 300 <= upstream.status_code < 400:
+        log.error("Production portal export unexpectedly redirected for %s", export_name)
+        return json_error(502, "Production portal export is unavailable.")
+    headers = {
+        name: upstream.headers[name]
+        for name in ("content-type", "content-disposition")
+        if name in upstream.headers
+    }
+    return Response(content=upstream.content, status_code=upstream.status_code, headers=headers)
+
+
 @router.post("/export-shortlisted")
 def export_shortlisted(body: dict = Body(default_factory=dict)):
     import re
@@ -531,12 +611,39 @@ def export_portal(request: Request):
     if email and not admin_accounts.get_access(email)["canViewEmployeePortal"]:
         return json_error(403, "Employee Portal is not available for this login.")
     try:
+        production_export = _production_portal_export(request, "export-portal")
+        if production_export is not None:
+            return production_export
         results = _test_results(get_store())
         employees = pr.build_portal_employees(results)
         done = [a["test_id"] for a in employees if a.get("test_id") and a.get("test_status") == "completed"]
         return _xlsx(exports.portal_workbook(employees, et.question_attempts_batch(done)), f"employee_portal_test_results_{date.today().isoformat()}.xlsx")
     except Exception as err:
         return public_error(err, "Export failed")
+
+
+@router.get("/export-portal-summary", dependencies=[Depends(require_permission("employeePortal"))])
+def export_portal_summary(request: Request):
+    from datetime import date
+
+    from services import exports
+
+    email = acting_admin_email(request) or ""
+    if email and not admin_accounts.get_access(email)["canViewEmployeePortal"]:
+        return json_error(403, "Employee Portal is not available for this login.")
+    try:
+        production_export = _production_portal_export(request, "export-portal-summary")
+        if production_export is not None:
+            return production_export
+        results = _test_results(get_store())
+        employees = pr.build_portal_employees(results)
+        done = [a["test_id"] for a in employees if a.get("test_id") and a.get("test_status") == "completed"]
+        source_name = f"employee_portal_test_results_{date.today().isoformat()}.xlsx"
+        detail_workbook = exports.portal_workbook(employees, et.question_attempts_batch(done))
+        data = exports.portal_summary_workbook(detail_workbook, source_name)
+        return _xlsx(data, f"employee_portal_summary_{date.today().isoformat()}.xlsx")
+    except Exception as err:
+        return public_error(err, "Summary export failed")
 
 
 @router.post("/percentage-matching")

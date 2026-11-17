@@ -283,14 +283,15 @@ def _json_list(raw, expected: int, label: str) -> list[str]:
     return texts[:expected]
 
 
-def _ask(prompt: str, max_tokens: int) -> object:
+def _ask(prompt: str, max_tokens: int, priority: int = llm.PRIORITY_BATCH) -> object:
     try:
-        return llm.complete_json(prompt, temperature=0.2, max_tokens=max_tokens, timeout_s=300, priority=llm.PRIORITY_BATCH)
+        return llm.complete_json(prompt, temperature=0.2, max_tokens=max_tokens, timeout_s=300, priority=priority)
     except llm.LlmError as err:
         raise QuestionGenError(str(err)) from err
 
 
-def personal_verbal_prompt(count: int, gap: int, projects: int, brief: str, jd: str) -> str:
+def personal_verbal_prompt(overlap: int, gap: int, projects: int, brief: str, jd: str) -> str:
+    count = overlap + gap + projects
     return f"""You are an elite technical interviewer. Write {count} highly specific technical verbal interview questions for this candidate.
 
 Job description / business requirement:
@@ -300,9 +301,9 @@ Candidate:
 {brief}
 
 RULES:
-1. Match depth to the candidate's seniority. Never ask about technologies absent from the candidate's profile unless framed as transferability of a skill they do have.
-2. Exactly {gap} questions on requirement areas the candidate may be thin on (framed as transferability) and exactly {projects} on the candidate's own projects and experience.
-3. Use scenarios, troubleshooting and trade-offs rather than definitions.
+1. Use only facts and skills explicitly present in the candidate profile or job description. Never claim the candidate has experience or skills not shown in the profile.
+2. Match depth to the candidate's seniority and use scenarios, troubleshooting and trade-offs rather than definitions.
+3. Generate exactly {overlap} questions about skills present in both the profile and job description, exactly {gap} transferability questions about job requirements not evidenced in the profile, and exactly {projects} questions about the candidate's own projects and experience.
 4. Return ONLY a JSON array of {count} objects: [{{"question": "...", "difficulty": "Easy|Medium|Hard", "source": "JD Skill|CV Skill"}}]"""
 
 
@@ -349,19 +350,20 @@ def valid_coding(text: str, language: str) -> bool:
     return not any(re.search(NAMED_PATTERNS[other], low) for other in SUPPORTED if other != language)
 
 
-def ai_verbal(count: int, gap: int, projects: int, brief: str, jd: str, taken: set) -> list[str]:
-    texts = _json_list(_ask(personal_verbal_prompt(count, gap, projects, brief, jd), 1400), count, "verbal")
+def ai_verbal(overlap: int, gap: int, projects: int, brief: str, jd: str, taken: set) -> list[str]:
+    count = overlap + gap + projects
+    texts = _json_list(_ask(personal_verbal_prompt(overlap, gap, projects, brief, jd), 1400, llm.PRIORITY_LIVE), count, "verbal")
     return [t for t in texts if _norm(t) not in taken]
 
 
 def ai_coding(count: int, language: str, brief: str, jd: str) -> list[str]:
-    raw = _ask(personal_coding_prompt(count, language, brief, jd), 1600)
+    raw = _ask(personal_coding_prompt(count, language, brief, jd), 1600, llm.PRIORITY_LIVE)
     texts = [t for t in (_item_text(i) for i in (raw if isinstance(raw, list) else [])) if t]
     return [t for t in texts if valid_coding(t, language)][:count]
 
 
 def ai_non_tech(counts: dict, brief: str, jd: str) -> list[str]:
-    return _json_list(_ask(personal_non_tech_prompt(counts, brief, jd), 1200), sum(counts.values()), "non-technical")
+    return _json_list(_ask(personal_non_tech_prompt(counts, brief, jd), 1200, llm.PRIORITY_LIVE), sum(counts.values()), "non-technical")
 
 
 def _mark(texts: list[str], kind: str, source: str, language: Optional[str] = None) -> list[dict]:
@@ -382,17 +384,17 @@ def build_set(resume: dict, config: dict, jd: str, use_ai: bool, seed: str) -> d
     items: list[dict] = []
     if include_tech:
         overlap, personal, coding = counts["overlapping"], counts["gap"] + counts["projects"], counts["coding"]
-        items += _mark(preset_verbal(keys, overlap, rng, taken), "verbal", "preset")
-        personal_texts: list[str] = []
-        if use_ai and personal:
-            personal_texts = ai_verbal(personal, counts["gap"], counts["projects"], brief, jd, taken)
-            taken.update(_norm(t) for t in personal_texts)
-            items += _mark(personal_texts, "verbal", "ai")
-        short = personal - len(personal_texts)
-        if short > 0:
-            items += _mark(template_personal(resume, jd, short, rng, taken), "verbal", "template")
-            short = personal - sum(1 for i in items if i["kind"] == "verbal" and i["source"] in ("ai", "template"))
-            items += _mark(preset_verbal(keys, max(0, short), rng, taken), "verbal", "preset")
+        verbal_texts: list[str] = []
+        if use_ai and overlap + personal:
+            verbal_texts = ai_verbal(overlap, counts["gap"], counts["projects"], brief, jd, taken)
+            taken.update(_norm(t) for t in verbal_texts)
+            items += _mark(verbal_texts, "verbal", "ai")
+        missing_verbal = overlap + personal - len(verbal_texts)
+        if missing_verbal > 0:
+            template_count = min(personal, missing_verbal)
+            items += _mark(template_personal(resume, jd, template_count, rng, taken), "verbal", "template")
+            missing_verbal -= template_count
+            items += _mark(preset_verbal(keys, missing_verbal, rng, taken), "verbal", "preset")
         coding_texts: list[str] = []
         if use_ai and coding:
             coding_texts = ai_coding(coding, language, brief, jd)

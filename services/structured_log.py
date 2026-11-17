@@ -7,6 +7,7 @@ from typing import Optional
 
 from core import request_context
 from core.config import UPLOAD_DIR
+from core.logger import logger
 
 log = logging.getLogger("talentscope")
 _lock = threading.Lock()
@@ -14,29 +15,42 @@ MODULE_RE = re.compile(r"^[A-Za-z0-9_-]{1,40}$")
 
 
 def _dir():
-    path = UPLOAD_DIR / "logs"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return UPLOAD_DIR / "logs"
 
 
 def write_log(module: str, action: str, status: str, details: str, actor: Optional[str] = None) -> None:
     if not MODULE_RE.match(module):
         return
+    from services.system_logs import redact_text
+
+    if module in {"candidate-processing", "interview", "employee", "ai"}:
+        details = f"{action} ({status})"
+    else:
+        details = redact_text(details)
     entry = {"timestamp": datetime.now(timezone.utc).isoformat(), "module": module, "action": action,
              "status": status, "details": details, "actor": actor or request_context.actor()}
     client_ip = request_context.ip()
     if client_ip:
         entry["ip"] = client_ip
-    line = json.dumps(entry) + "\n"
+    level = "ERROR" if status.lower() in ("failed", "error") or module == "error" else (
+        "WARNING" if status.lower() == "warning" else "INFO"
+    )
+    logger.bind(
+        module=module,
+        action=action,
+        status=status,
+        actor=entry.get("actor"),
+        ip=entry.get("ip"),
+        request_id=request_context.request_id(),
+    ).log(level, details)
     try:
-        with _lock:
-            with open(_dir() / f"{module}.log", "a", encoding="utf-8") as handle:
-                handle.write(line)
-            if status.lower() in ("failed", "error", "warning") or module == "error":
-                with open(_dir() / "error.log", "a", encoding="utf-8") as handle:
-                    handle.write(line)
-    except OSError as err:
-        log.error("Failed to write structured log: %s", err)
+        from services.system_logs import record_business_event
+
+        record_business_event(module, action, status, details, actor or "")
+    except Exception:
+        logger.bind(module="logging", action="business_event_write_failed").exception(
+            "Failed to write business event log"
+        )
 
 
 def read_logs(module: str = "all") -> list[dict]:
@@ -45,7 +59,8 @@ def read_logs(module: str = "all") -> list[dict]:
         if MODULE_RE.match(module):
             files = [_dir() / f"{module}.log"]
     else:
-        files = [f for f in _dir().glob("*.log") if f.name != "error.log"]
+        directory = _dir()
+        files = [f for f in directory.glob("*.log") if f.name != "error.log"] if directory.is_dir() else []
     logs = []
     for path in files:
         try:
@@ -108,9 +123,10 @@ def _audit_entry(row: dict) -> dict:
     return entry
 
 
-def merged_logs(module: str = "all") -> list[dict]:
+def merged_logs(module: str = "all", filters: Optional[dict] = None) -> list[dict]:
     from services import audit
 
+    filters = filters or {}
     file_logs = read_logs("all")
     stamped = [(entry, _epoch(entry.get("timestamp"))) for entry in file_logs]
     out = list(file_logs)
@@ -127,6 +143,48 @@ def merged_logs(module: str = "all") -> list[dict]:
             if twins:
                 continue
         out.append(entry)
+    try:
+        from services.system_logs import list_logs
+
+        for row in list_logs(
+            limit=2000,
+            module="" if module == "all" else module,
+            user=str(filters.get("user") or ""),
+            level=str(filters.get("level") or ""),
+            from_date=str(filters.get("from_date") or ""),
+            to_date=str(filters.get("to_date") or ""),
+            search=str(filters.get("search") or ""),
+        ):
+            entry = {
+                "timestamp": str(row.get("timestamp") or ""),
+                "module": str(row.get("module") or "application"),
+                "action": str(row.get("action") or "UNKNOWN"),
+                "status": str(row.get("status") or "success").lower(),
+                "details": str(row.get("message") or ""),
+                "actor": str(row.get("user_email") or "public"),
+                "ip": str(row.get("ip_address") or ""),
+                "request_id": row.get("request_id"),
+                "user_role": row.get("user_role"),
+                "user_agent": row.get("user_agent"),
+                "endpoint": row.get("endpoint"),
+                "execution_time": row.get("execution_time"),
+                "db_operation": row.get("db_operation"),
+                "table_name": row.get("table_name"),
+                "record_id": row.get("record_id"),
+                "model": row.get("model"),
+                "input_tokens": row.get("input_tokens"),
+                "output_tokens": row.get("output_tokens"),
+                "level": row.get("log_level"),
+                "error_message": row.get("error_message"),
+                "stack_trace": row.get("stack_trace"),
+                "request_payload": row.get("request_payload"),
+                "response_payload": row.get("response_payload"),
+            }
+            out.append(entry)
+    except Exception:
+        logger.bind(module="logging", action="database_read_failed").exception(
+            "Could not read persistent system logs"
+        )
     out.sort(key=lambda e: _epoch(e.get("timestamp")), reverse=True)
     if module == "error":
         return [e for e in out if str(e.get("status", "")).lower() in ("failed", "error", "warning") or e.get("module") == "error"]
