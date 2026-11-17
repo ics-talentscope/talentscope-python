@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from core.db import get_store
-from services import accounts, question_bank, test_video
+from services import accounts, test_video
 from services.structured_log import write_log
 
 log = logging.getLogger("talentscope")
@@ -212,6 +212,8 @@ def reset_test(test_id: str) -> None:
         "session_recording_url": None, "proctoring": None, "score_correct": None, "score_total": None,
         "score_percent": None, "ai_analysis": None}, {"id": test_id})
     test_video.delete(test_id)
+    # Keep the assigned questions as-is; only reshuffle question order and each
+    # question's options so a retake cannot reuse memorised positions.
     shuffle_questions(test_id)
 
 
@@ -247,19 +249,6 @@ def shuffle_questions(test_id: str) -> None:
             },
             {"id": question["id"]},
         )
-
-
-def regenerate_questions(test: dict) -> None:
-    store = get_store()
-    test_id = test["id"]
-    difficulty = test.get("difficulty") or "medium"
-    store.update("tests", {"status": "pending", "in_progress": None, "current_question_index": 0,
-                           "started_at": _now(), "completed_at": None, "total_questions": 10}, {"id": test_id})
-    store.delete("test_attempts", {"test_id": test_id})
-    store.delete("test_questions", {"test_id": test_id})
-    generated = question_bank.fetch_questions(test.get("subject_title") or "", test.get("topic_title") or test["topic_id"], difficulty)
-    store.insert("test_questions", question_bank.to_rows(test_id, generated, test["topic_id"], test.get("topic_title") or "", difficulty))
-    shuffle_questions(test_id)
 
 
 def _option_label(index: int) -> str:

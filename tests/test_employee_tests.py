@@ -99,11 +99,33 @@ def test_proctoring_cooldown_and_auto_submit(client, world, store, monkeypatch):
     assert third["autoSubmit"] is True and third["proctoring"]["warningCount"] == 3
 
 
-def test_reset_regenerates_questions(client, world, store):
+def test_employee_cannot_reset_own_test(client, world, store):
+    original_questions = et.questions_for(TEST_ID)
     res = client.delete(f"/api/employee/tests/{TEST_ID}", headers=world)
-    assert res.status_code == 200
-    qs = store.select("test_questions", {"test_id": TEST_ID})
-    assert len(qs) == 10 and store.first("tests", {"id": TEST_ID})["status"] == "pending"
+    assert res.status_code == 403
+    assert "administrator" in res.json()["error"].lower()
+    assert store.first("tests", {"id": TEST_ID})["status"] == "pending"
+    assert et.questions_for(TEST_ID) == original_questions
+
+
+def test_admin_reset_shuffles_existing_questions(client, world, store, monkeypatch):
+    class ReverseRandom:
+        def shuffle(self, values):
+            values.reverse()
+
+    monkeypatch.setattr(et.random, "SystemRandom", ReverseRandom)
+    original = {q["id"]: (list(q["options"]), q["correct_option_index"]) for q in et.questions_for(TEST_ID)}
+
+    et.reset_test(TEST_ID)
+
+    shuffled = et.questions_for(TEST_ID)
+    assert len(shuffled) == len(original) == 3
+    assert [q["id"] for q in shuffled] == [Q[2], Q[1], Q[0]]
+    assert store.first("tests", {"id": TEST_ID})["status"] == "pending"
+    for question in shuffled:
+        options, correct_index = original[question["id"]]
+        assert question["options"] == options[::-1]
+        assert question["options"][question["correct_option_index"]] == options[correct_index]
 
 
 def test_product_assessment_reset_archives_history(client, world, store, monkeypatch):
@@ -114,8 +136,12 @@ def test_product_assessment_reset_archives_history(client, world, store, monkeyp
     monkeypatch.setattr(et.random, "SystemRandom", ReverseRandom)
     store.update("tests", {"topic_id": "resource-product-assessment", "status": "completed", "score_percent": 80}, {"id": TEST_ID})
     store.update("employees", {"product_qb_eligible": True}, {"employee_id": "EMP1"})
-    res = client.delete(f"/api/employee/tests/{TEST_ID}", headers=world).json()
-    assert res == {"success": True, "archived": True}
+    res = client.delete(f"/api/employee/tests/{TEST_ID}", headers=world)
+    assert res.status_code == 403
+    assert not any(t["topic_id"].startswith("resource-product-assessment-history:") for t in store.select("tests"))
+
+    # Admin reset still archives the previous attempt and reshuffles the paper.
+    et.reset_test(TEST_ID)
     topics = [t["topic_id"] for t in store.select("tests")]
     assert any(t.startswith("resource-product-assessment-history:") for t in topics)
     assert store.first("tests", {"id": TEST_ID})["status"] == "pending"
@@ -126,7 +152,6 @@ def test_product_assessment_reset_archives_history(client, world, store, monkeyp
     assert all(question["options"][question["correct_option_index"]] == "b" for question in shuffled)
     history = [t for t in store.select("tests") if t["topic_id"].startswith("resource-product-assessment-history")][0]
     assert len(store.select("test_questions", {"test_id": history["id"]})) == 3
-    assert client.delete(f"/api/employee/tests/{history['id']}", headers=world).status_code == 403
 
 
 def test_video_upload_progress_and_chunks(client, world, store, monkeypatch, tmp_path):

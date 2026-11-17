@@ -8,7 +8,7 @@ from core.auth import employee_id_from_request, require_employee
 from core.db import get_store
 from core.errors import json_error, public_error
 from core.validation import as_path_id
-from services import accounts, audit, employee_tests as et, question_bank, storage, test_backup, test_video
+from services import accounts, employee_tests as et, storage, test_backup, test_video
 from services.products import format_topic_title_for_display
 from services.structured_log import write_log
 
@@ -118,26 +118,10 @@ def patch_test(test_id: str, body: dict = Body(default_factory=dict), employee: 
 
 @router.delete("/{test_id}")
 def reset_test(test_id: str, employee: dict = Depends(require_employee)):
-    test = _owned(test_id, employee)
-    if not test:
-        return json_error(404, "Not found")
-    try:
-        topic = test.get("topic_id")
-        if accounts.is_product_assessment_history_topic(topic):
-            return json_error(403, "Previous attempts are kept for review and cannot be overwritten.")
-        if topic == accounts.PRODUCT_ASSESSMENT_TOPIC_ID:
-            et.reset_test(test["id"])
-            audit.add_log(employee["email"], "RESET_EMPLOYEE_TEST", "Employee Portal",
-                          f"Archived previous attempt and reset product assessment {test['id']} for employee {employee['employee_id']}", "")
-            return {"success": True, "archived": True}
-        test_video.delete(test["id"])
-        et.regenerate_questions(test)
-        audit.add_log(employee["email"], "RESET_EMPLOYEE_TEST", "Employee Portal",
-                      f"Reset employee learning test {test['id']} for employee {employee['employee_id']}", "")
-        return {"success": True}
-    except Exception as err:
-        audit.add_log(employee["email"], "RESET_EMPLOYEE_TEST_FAILED", "Employee Portal", f"Failed to reset test {test_id}", "")
-        return public_error(err, "Internal error")
+    # Retakes are admin-controlled only. An employee cannot reset their own assessment:
+    # self-service resets skipped the fresh-session setup (fullscreen, camera, proctoring).
+    # Keep the route so stale clients get a clear message instead of a generic 405.
+    return json_error(403, "Employees cannot reset their own assessment. Contact your administrator to reset it for a retake.")
 
 
 @router.post("/{test_id}/start")

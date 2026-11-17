@@ -95,13 +95,13 @@ def fallback_questions(topic_title: str) -> list[dict]:
     banks = _banks()
     if "history" in title:
         key = "history"
-    elif "search algorithm" in title:
+    elif "search" in title or "bfs" in title or "dfs" in title or "a*" in title or "agent" in title:
         key = "search_algorithm"
-    elif "adversarial" in title:
+    elif "adversarial" in title or "minimax" in title:
         key = "adversarial"
-    elif "logical" in title or "knowledge representation" in title:
+    elif "logical" in title or "knowledge representation" in title or "inference" in title:
         key = "logical"
-    elif "expert system" in title:
+    elif "expert" in title:
         key = "expert_system"
     else:
         key = "generic"
@@ -140,13 +140,29 @@ def fetch_questions(subject: str, topic: str, difficulty: str, count: int = 10) 
 
 
 def generate_ai_questions(subject: str, topic: str, difficulty: str, count: int = 10) -> list[dict]:
+    source_context_block = ""
+    try:
+        from services import topic_sources
+        src = topic_sources.get_topic_source(topic, "", subject, difficulty)
+        explanation = src.get("explanation", "").strip()
+        if explanation:
+            source_context_block = f"""
+Reference Source Material (What must be tested):
+\"\"\"
+{explanation}
+\"\"\"
+IMPORTANT: Every generated question must be directly related to the facts, milestones, and concepts covered in the Reference Source Material above.
+"""
+    except Exception as err:
+        log.warning("Could not attach topic source material to prompt: %s", err)
+
     prompt = f"""Create exactly {count} original multiple-choice assessment questions for an employee learning quiz.
 Subject: {subject}
 Topic: {topic}
 Difficulty: {difficulty}
-
+{source_context_block}
 Requirements:
-- Assess understanding of the named topic at the requested difficulty.
+- Assess understanding of the named topic and the provided source material at the requested difficulty.
 - Each question must have exactly four distinct, plausible answer options.
 - Exactly one option must be correct; do not make the answer obvious from wording.
 - Include a concise explanation of why the correct option is right.

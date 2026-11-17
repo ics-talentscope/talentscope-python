@@ -6,7 +6,7 @@ from fastapi import APIRouter, Body, Depends, Request
 from core.auth import employee_id_from_request, require_employee
 from core.db import get_store
 from core.errors import json_error, public_error
-from services import accounts, employee_tests as et, portal, question_bank, test_video
+from services import accounts, employee_tests as et, portal, question_bank, test_video, topic_sources
 from services.portal import js_round
 from services.products import format_topic_title_for_display
 
@@ -301,6 +301,31 @@ def _resolve_topic(topic_id: str, difficulty: str) -> dict:
         raise LookupError("Topic not found")
     return {"topic_title": static["title"], "subject_title": static["subject_title"], "subject_id": static["subject_id"],
             "difficulty": static["difficulty"]}
+
+
+@router.get("/learning/{topic_id}/source")
+def topic_source(topic_id: str, employee: dict = Depends(require_employee)):
+    try:
+        if accounts.is_assessment_only_employee(employee):
+            return json_error(403, "Other learning tests are disabled. Please take your assigned product assessment only.")
+        source_data = topic_sources.get_topic_source(topic_id)
+        try:
+            info = _resolve_topic(topic_id, source_data.get("difficulty", "intermediate"))
+            if info:
+                title = info.get("topic_title") or source_data.get("topic_title") or topic_id
+                source_data = {
+                    **source_data,
+                    "topic_title": topic_sources.format_title_case(title),
+                    "subject_title": topic_sources.format_title_case(info.get("subject_title") or source_data.get("subject_title")),
+                    "subject_id": info.get("subject_id") or source_data.get("subject_id"),
+                    "difficulty": info.get("difficulty") or source_data.get("difficulty"),
+                }
+        except Exception:
+            if source_data.get("topic_title"):
+                source_data["topic_title"] = topic_sources.format_title_case(source_data["topic_title"])
+        return source_data
+    except Exception as err:
+        return public_error(err, "Failed to load topic source material")
 
 
 @router.post("/learning/{topic_id}/ai-quiz")

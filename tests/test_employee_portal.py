@@ -39,6 +39,20 @@ def test_ai_quiz_creates_resumes_and_resets(client, auth, store):
 def test_ai_quiz_blocked_for_assessment_only(client, auth, store):
     store.update("employees", {"assessment_only": True}, {"employee_id": "EMP1"})
     assert client.post("/api/employee/learning/ai-fundamentals/ai-quiz", headers=auth).status_code == 403
+    assert client.get("/api/employee/learning/ai-intro-history/source", headers=auth).status_code == 403
+
+
+def test_topic_source_guide(client, auth):
+    res = client.get("/api/employee/learning/ai-intro-history/source", headers=auth)
+    assert res.status_code == 200
+    data = res.json()
+    assert data["topic_title"] == "History of AI"
+    assert data["word_count"] >= 300
+    assert len(data["sources"]) == 2
+    assert any(s["name"] == "GeeksforGeeks" for s in data["sources"])
+    assert any(s["name"] == "Wikipedia" for s in data["sources"])
+    assert len(data["key_points"]) >= 4
+    assert "Turing" in data["explanation"]
 
 
 def test_assigned_test_states(client, auth, store):
@@ -134,3 +148,6 @@ def test_admin_portal_keeps_history_in_employee_test_list():
     history = employee["tests"][0]
     assert history["topicTitle"] == "TPM Upskilling"
     assert history["status"] == "completed"
+    # topicId lets the admin UI exclude archived attempts from single-test reset selection.
+    assert history["topicId"] == "resource-product-assessment-history:old"
+    assert employee["tests"][1]["topicId"] == "resource-product-assessment"

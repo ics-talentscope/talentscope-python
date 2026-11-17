@@ -301,7 +301,7 @@ def merge_portal_data(profile_rows: list[dict], results: list[dict], manifest: d
             "test_status": derive_status(row.get("assigned_question_count") or (25 if manifest_id else 0), status_test_id, raw_status, answered, total,
                                          (assigned or primary or {}).get("startedAt")),
             "score": score, "score_max": score_max, "completed_at": completed_at,
-            "tests": [{"id": t["id"], "topicTitle": format_topic_title_for_display(t.get("topicTitle")), "subjectTitle": t.get("subjectTitle"),
+            "tests": [{"id": t["id"], "topicId": t.get("topicId"), "topicTitle": format_topic_title_for_display(t.get("topicTitle")), "subjectTitle": t.get("subjectTitle"),
                        "difficulty": t.get("difficulty"), "totalQuestions": t.get("totalQuestions"), "status": t.get("status"),
                        "score": t.get("correctCount") if t.get("correctCount") is not None else t.get("score"), "scoreMax": t.get("totalQuestions"),
                        "videoUrl": t.get("videoUrl"), "hasRecording": bool(t.get("hasRecording")), "proctoring": t.get("proctoring"),
