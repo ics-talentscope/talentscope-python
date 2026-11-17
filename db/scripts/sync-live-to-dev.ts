@@ -1,15 +1,16 @@
 /**
  * One-way copy: rows saved in TalentScope_DB_Live -> the database the VM app uses (MSSQL_DATABASE).
- * Reads Live only; every write goes to the connected (app) database. Never deletes.
+ * Reads Live only; every write goes to the connected (app) database. Never writes Live.
  *
  * A Live row is copied when it is new or its contents changed since it was last copied (SHA-256 of the row,
- * kept in dbo.__live_sync_rows). Rows the app changed itself stay as they are until Live changes them again;
- * a Live row that clashes with app data (unique key, missing parent) is skipped and logged once.
- * The first run inserts missing Live rows and records all source hashes, without overwriting existing app data.
+ * kept in dbo.__live_sync_rows). Employee ID is the stable identity: when the same employee exists in both
+ * databases under different GUIDs, Dev is remapped to Live's keys (employees, then tests, questions, and
+ * sessions) and Live's columns overwrite Dev. Unique-key clashes therefore take Live, not the app copy.
  * Product-bank settings are merged with Live taking precedence for shared products; Dev-only products are retained.
  *
- * Usage: tsx scripts/sync-live-to-dev.ts [--tables=a,b] [--dry-run]
- * Env: MSSQL_* (app database, the target), SYNC_SOURCE_DATABASE (default TalentScope_DB_Live).
+ * Usage: tsx scripts/sync-live-to-dev.ts [--tables=a,b] [--dry-run] [--interval-minutes=N]
+ * Env: MSSQL_* (app database, the target), SYNC_SOURCE_DATABASE (default TalentScope_DB_Live),
+ *      SYNC_INTERVAL_MINUTES (optional loop when --interval-minutes is omitted).
  */
 import { applyTargetArg, argValue, loadProjectEnv } from "./lib/env";
 import { connect, resolveMssqlTarget, sql } from "./lib/mssql";
@@ -37,8 +38,20 @@ type Result = {
   seeded?: number;
   notInApp?: number;
 };
+type IdentityAdopt = {
+  employees: number;
+  tests: number;
+  questions: number;
+  sessions: number;
+};
 
 type Shape = { cols: string[]; identity: boolean; textual: Set<string> };
+
+function intervalMinutes(): number {
+  const raw = argValue(argv, "interval-minutes") ?? process.env.SYNC_INTERVAL_MINUTES ?? "0";
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+}
 
 async function columnsFor(pool: Pool, table: string): Promise<Shape | null> {
   const result = await pool.request().input("src", sql.NVarChar, `${SOURCE}.dbo.${table}`).input("dst", sql.NVarChar, `dbo.${table}`).query(`
@@ -78,13 +91,6 @@ function statements(table: TableDef, shape: Shape) {
   return {
     hashes: `SELECT ${key("s")} AS k, ${hash} AS h FROM ${src} s WHERE ${sourceScope}`,
     missingInApp: `SELECT COUNT(*) AS n FROM ${src} s WHERE ${sourceScope} AND NOT EXISTS (SELECT 1 FROM ${dst} d WHERE ${join})`,
-    insertMissing: `
-      DECLARE @inserted int = 0;
-      INSERT INTO ${dst} (${q.join(", ")})
-      SELECT ${q.map((c) => `s.${c}`).join(", ")} FROM ${src} s JOIN #chg c ON c.k = ${key("s")}
-      WHERE ${sourceScope} AND NOT EXISTS (SELECT 1 FROM ${dst} d WHERE ${join});
-      SET @inserted = @@ROWCOUNT;
-      SELECT 0 AS updated, @inserted AS inserted;`,
     apply: `
       DECLARE @updated int = 0, @inserted int = 0;
       ${update}
@@ -133,18 +139,313 @@ async function applyBatch(pool: Pool, table: TableDef, apply: string, rows: Chan
   }
 }
 
-async function recordOnly(pool: Pool, table: TableDef, rows: Changed[]) {
+/**
+ * Point Dev at Live's GUIDs when the business key already matches.
+ * Employee ID is the permanent relation; tests follow (employee + topic), questions (test + index),
+ * and candidate sessions (email or code).
+ */
+async function adoptLiveIdentities(pool: Pool): Promise<IdentityAdopt> {
   const tx = new sql.Transaction(pool);
   await tx.begin();
   try {
-    await loadChg(tx, rows);
-    await recordState(tx, table.name);
+    const counts = (
+      await new sql.Request(tx).query(`
+        SET NOCOUNT ON;
+        IF OBJECT_ID('tempdb..#emp_map') IS NOT NULL DROP TABLE #emp_map;
+        IF OBJECT_ID('tempdb..#test_map') IS NOT NULL DROP TABLE #test_map;
+        IF OBJECT_ID('tempdb..#q_map') IS NOT NULL DROP TABLE #q_map;
+        IF OBJECT_ID('tempdb..#sess_map') IS NOT NULL DROP TABLE #sess_map;
+        CREATE TABLE #emp_map (live_id uniqueidentifier NOT NULL PRIMARY KEY, dev_id uniqueidentifier NOT NULL UNIQUE);
+        CREATE TABLE #test_map (live_id uniqueidentifier NOT NULL PRIMARY KEY, dev_id uniqueidentifier NOT NULL UNIQUE);
+        CREATE TABLE #q_map (live_id uniqueidentifier NOT NULL PRIMARY KEY, dev_id uniqueidentifier NOT NULL UNIQUE);
+        CREATE TABLE #sess_map (live_id uniqueidentifier NOT NULL PRIMARY KEY, dev_id uniqueidentifier NOT NULL UNIQUE);
+
+        INSERT INTO #emp_map (live_id, dev_id)
+        SELECT live_id, dev_id FROM (
+          SELECT s.id AS live_id, d.id AS dev_id,
+                 ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY d.id) AS rn_live,
+                 ROW_NUMBER() OVER (PARTITION BY d.id ORDER BY s.id) AS rn_dev
+          FROM [${SOURCE}].dbo.employees s
+          JOIN dbo.employees d
+            ON s.employee_id COLLATE DATABASE_DEFAULT = d.employee_id COLLATE DATABASE_DEFAULT
+           AND s.id <> d.id
+          WHERE NOT EXISTS (SELECT 1 FROM dbo.employees x WHERE x.id = s.id)
+        ) m WHERE rn_live = 1 AND rn_dev = 1;
+
+        INSERT INTO #test_map (live_id, dev_id)
+        SELECT live_id, dev_id FROM (
+          SELECT s.id AS live_id, d.id AS dev_id,
+                 ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY d.id) AS rn_live,
+                 ROW_NUMBER() OVER (PARTITION BY d.id ORDER BY s.id) AS rn_dev
+          FROM [${SOURCE}].dbo.tests s
+          JOIN [${SOURCE}].dbo.employees se ON se.id = s.employee_id
+          JOIN dbo.employees de
+            ON de.employee_id COLLATE DATABASE_DEFAULT = se.employee_id COLLATE DATABASE_DEFAULT
+          JOIN dbo.tests d
+            ON d.employee_id = de.id
+           AND d.topic_id COLLATE DATABASE_DEFAULT = s.topic_id COLLATE DATABASE_DEFAULT
+           AND d.id <> s.id
+          WHERE NOT EXISTS (SELECT 1 FROM dbo.tests x WHERE x.id = s.id)
+        ) m WHERE rn_live = 1 AND rn_dev = 1;
+
+        INSERT INTO #q_map (live_id, dev_id)
+        SELECT live_id, dev_id FROM (
+          SELECT s.id AS live_id, d.id AS dev_id,
+                 ROW_NUMBER() OVER (PARTITION BY s.id ORDER BY d.id) AS rn_live,
+                 ROW_NUMBER() OVER (PARTITION BY d.id ORDER BY s.id) AS rn_dev
+          FROM [${SOURCE}].dbo.test_questions s
+          JOIN dbo.test_questions d
+            ON d.question_index = s.question_index
+           AND d.id <> s.id
+           AND (
+                d.test_id = s.test_id
+             OR EXISTS (SELECT 1 FROM #test_map t WHERE t.live_id = s.test_id AND t.dev_id = d.test_id)
+           )
+          WHERE NOT EXISTS (SELECT 1 FROM dbo.test_questions x WHERE x.id = s.id)
+        ) m WHERE rn_live = 1 AND rn_dev = 1;
+
+        INSERT INTO #sess_map (live_id, dev_id)
+        SELECT live_id, dev_id FROM (
+          SELECT s.id AS live_id, d.id AS dev_id,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY s.id
+                   ORDER BY CASE
+                     WHEN s.email IS NOT NULL AND d.email COLLATE DATABASE_DEFAULT = s.email COLLATE DATABASE_DEFAULT THEN 0
+                     ELSE 1
+                   END, d.id
+                 ) AS rn_live,
+                 ROW_NUMBER() OVER (PARTITION BY d.id ORDER BY s.id) AS rn_dev
+          FROM [${SOURCE}].dbo.candidate_sessions s
+          JOIN dbo.candidate_sessions d ON d.id <> s.id
+           AND (
+                (s.email IS NOT NULL AND d.email COLLATE DATABASE_DEFAULT = s.email COLLATE DATABASE_DEFAULT)
+             OR (s.code IS NOT NULL AND d.code COLLATE DATABASE_DEFAULT = s.code COLLATE DATABASE_DEFAULT)
+           )
+          WHERE NOT EXISTS (SELECT 1 FROM dbo.candidate_sessions x WHERE x.id = s.id)
+        ) m WHERE rn_live = 1 AND rn_dev = 1;
+
+        IF OBJECT_ID(N'dbo.tests', N'U') IS NOT NULL
+          ALTER TABLE dbo.tests NOCHECK CONSTRAINT FK_tests_employees;
+        IF OBJECT_ID(N'dbo.test_attempts', N'U') IS NOT NULL
+        BEGIN
+          ALTER TABLE dbo.test_attempts NOCHECK CONSTRAINT FK_ta_employees;
+          ALTER TABLE dbo.test_attempts NOCHECK CONSTRAINT FK_ta_tests;
+          ALTER TABLE dbo.test_attempts NOCHECK CONSTRAINT FK_ta_questions;
+        END;
+        IF OBJECT_ID(N'dbo.test_questions', N'U') IS NOT NULL
+          ALTER TABLE dbo.test_questions NOCHECK CONSTRAINT FK_tq_tests;
+        IF OBJECT_ID(N'dbo.employee_auth_otps', N'U') IS NOT NULL
+          ALTER TABLE dbo.employee_auth_otps NOCHECK CONSTRAINT FK_employee_auth_otps_employee;
+
+        UPDATE t SET t.employee_id = m.live_id
+        FROM dbo.tests t JOIN #emp_map m ON t.employee_id = m.dev_id;
+        UPDATE t SET t.employee_id = m.live_id
+        FROM dbo.test_attempts t JOIN #emp_map m ON t.employee_id = m.dev_id;
+        IF OBJECT_ID(N'dbo.employee_auth_otps', N'U') IS NOT NULL
+          UPDATE t SET t.employee_id = m.live_id
+          FROM dbo.employee_auth_otps t JOIN #emp_map m ON t.employee_id = m.dev_id;
+        UPDATE e SET e.id = m.live_id
+        FROM dbo.employees e JOIN #emp_map m ON e.id = m.dev_id;
+
+        UPDATE q SET q.test_id = m.live_id
+        FROM dbo.test_questions q JOIN #test_map m ON q.test_id = m.dev_id;
+        UPDATE a SET a.test_id = m.live_id
+        FROM dbo.test_attempts a JOIN #test_map m ON a.test_id = m.dev_id;
+        UPDATE t SET t.id = m.live_id
+        FROM dbo.tests t JOIN #test_map m ON t.id = m.dev_id;
+
+        UPDATE a SET a.question_id = m.live_id
+        FROM dbo.test_attempts a JOIN #q_map m ON a.question_id = m.dev_id;
+        UPDATE q SET q.id = m.live_id
+        FROM dbo.test_questions q JOIN #q_map m ON q.id = m.dev_id;
+
+        UPDATE s SET s.id = m.live_id
+        FROM dbo.candidate_sessions s JOIN #sess_map m ON s.id = m.dev_id;
+
+        IF OBJECT_ID(N'dbo.tests', N'U') IS NOT NULL
+          ALTER TABLE dbo.tests WITH CHECK CHECK CONSTRAINT FK_tests_employees;
+        IF OBJECT_ID(N'dbo.test_questions', N'U') IS NOT NULL
+          ALTER TABLE dbo.test_questions WITH CHECK CHECK CONSTRAINT FK_tq_tests;
+        IF OBJECT_ID(N'dbo.test_attempts', N'U') IS NOT NULL
+        BEGIN
+          ALTER TABLE dbo.test_attempts WITH CHECK CHECK CONSTRAINT FK_ta_employees;
+          ALTER TABLE dbo.test_attempts WITH CHECK CHECK CONSTRAINT FK_ta_tests;
+          ALTER TABLE dbo.test_attempts WITH CHECK CHECK CONSTRAINT FK_ta_questions;
+        END;
+        IF OBJECT_ID(N'dbo.employee_auth_otps', N'U') IS NOT NULL
+          ALTER TABLE dbo.employee_auth_otps WITH CHECK CHECK CONSTRAINT FK_employee_auth_otps_employee;
+
+        DELETE r FROM dbo.__live_sync_rows r
+        JOIN #emp_map m ON r.table_name = N'employees'
+         AND r.row_key = CONVERT(nvarchar(200), m.live_id) COLLATE DATABASE_DEFAULT;
+        DELETE r FROM dbo.__live_sync_rows r
+        JOIN #test_map m ON r.table_name = N'tests'
+         AND r.row_key = CONVERT(nvarchar(200), m.live_id) COLLATE DATABASE_DEFAULT;
+        DELETE r FROM dbo.__live_sync_rows r
+        JOIN #q_map m ON r.table_name = N'test_questions'
+         AND r.row_key = CONVERT(nvarchar(200), m.live_id) COLLATE DATABASE_DEFAULT;
+        DELETE r FROM dbo.__live_sync_rows r
+        JOIN #sess_map m ON r.table_name = N'candidate_sessions'
+         AND r.row_key = CONVERT(nvarchar(200), m.live_id) COLLATE DATABASE_DEFAULT;
+
+        DELETE r FROM dbo.__live_sync_rows r
+        WHERE r.table_name = N'employees'
+          AND NOT EXISTS (
+            SELECT 1 FROM dbo.employees d
+            WHERE CONVERT(nvarchar(200), d.id) COLLATE DATABASE_DEFAULT = r.row_key
+          );
+        DELETE r FROM dbo.__live_sync_rows r
+        WHERE r.table_name = N'tests'
+          AND NOT EXISTS (
+            SELECT 1 FROM dbo.tests d
+            WHERE CONVERT(nvarchar(200), d.id) COLLATE DATABASE_DEFAULT = r.row_key
+          );
+        DELETE r FROM dbo.__live_sync_rows r
+        WHERE r.table_name = N'test_questions'
+          AND NOT EXISTS (
+            SELECT 1 FROM dbo.test_questions d
+            WHERE CONVERT(nvarchar(200), d.id) COLLATE DATABASE_DEFAULT = r.row_key
+          );
+        DELETE r FROM dbo.__live_sync_rows r
+        WHERE r.table_name = N'test_attempts'
+          AND NOT EXISTS (
+            SELECT 1 FROM dbo.test_attempts d
+            WHERE CONVERT(nvarchar(200), d.id) COLLATE DATABASE_DEFAULT = r.row_key
+          );
+        DELETE r FROM dbo.__live_sync_rows r
+        WHERE r.table_name = N'candidate_sessions'
+          AND NOT EXISTS (
+            SELECT 1 FROM dbo.candidate_sessions d
+            WHERE CONVERT(nvarchar(200), d.id) COLLATE DATABASE_DEFAULT = r.row_key
+          );
+
+        SELECT
+          (SELECT COUNT(*) FROM #emp_map) AS employees,
+          (SELECT COUNT(*) FROM #test_map) AS tests,
+          (SELECT COUNT(*) FROM #q_map) AS questions,
+          (SELECT COUNT(*) FROM #sess_map) AS sessions;
+      `)
+    ).recordset[0] ?? {};
     if (DRY_RUN) await tx.rollback();
     else await tx.commit();
+    return {
+      employees: Number(counts.employees || 0),
+      tests: Number(counts.tests || 0),
+      questions: Number(counts.questions || 0),
+      sessions: Number(counts.sessions || 0),
+    };
   } catch (err) {
     await tx.rollback().catch(() => {});
     throw err;
   }
+}
+
+/** Rows that still cannot land because a parent Live row is missing in Dev. Unique-key clashes are remapped, not skipped. */
+async function conflictingRows(pool: Pool, table: TableDef, changed: Changed[]) {
+  const conflictQueries: Record<string, string> = {
+    candidate_sessions: `
+      SELECT CONVERT(nvarchar(200), s.id) AS k, CAST(NULL AS nvarchar(200)) AS detail
+      FROM [${SOURCE}].dbo.candidate_sessions s
+      WHERE s.resume_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dbo.resumes r WHERE r.id = s.resume_id)`,
+    tests: `
+      SELECT CONVERT(nvarchar(200), s.id) AS k, CAST(NULL AS nvarchar(200)) AS detail
+      FROM [${SOURCE}].dbo.tests s
+      WHERE NOT EXISTS (SELECT 1 FROM dbo.employees e WHERE e.id = s.employee_id)`,
+    test_questions: `
+      SELECT CONVERT(nvarchar(200), s.id) AS k, CAST(NULL AS nvarchar(200)) AS detail
+      FROM [${SOURCE}].dbo.test_questions s
+      WHERE NOT EXISTS (SELECT 1 FROM dbo.tests t WHERE t.id = s.test_id)`,
+    test_attempts: `
+      SELECT CONVERT(nvarchar(200), s.id) AS k, CAST(NULL AS nvarchar(200)) AS detail
+      FROM [${SOURCE}].dbo.test_attempts s
+      WHERE NOT EXISTS (SELECT 1 FROM dbo.tests t WHERE t.id = s.test_id)
+         OR NOT EXISTS (SELECT 1 FROM dbo.test_questions q WHERE q.id = s.question_id)
+         OR NOT EXISTS (SELECT 1 FROM dbo.employees e WHERE e.id = s.employee_id)`,
+  };
+  const query = conflictQueries[table.name];
+  if (!query) return { rows: [] as Changed[], details: [] as string[] };
+  const rows = (await pool.request().query(query)).recordset;
+  const changedKeys = new Set(changed.map((row) => row.k.toLowerCase()));
+  const byKey = new Map(changed.map((row) => [row.k.toLowerCase(), row]));
+  const conflicts = rows.filter((row) => changedKeys.has(String(row.k).toLowerCase()));
+  return {
+    rows: conflicts.map((row) => byKey.get(String(row.k).toLowerCase())!).filter(Boolean),
+    details: conflicts.flatMap((row) => (row.detail == null ? [] : [String(row.detail)])),
+  };
+}
+
+async function syncTable(pool: Pool, table: TableDef): Promise<Result | string> {
+  if (table.pk.length !== 1) return "composite key, skipped";
+  const shape = await columnsFor(pool, table.name);
+  if (!shape) return "not in both databases, skipped";
+  if (!shape.cols.includes(table.pk[0])) return `key ${table.pk[0]} missing, skipped`;
+  if (shape.identity) return "identity column, skipped";
+  const st = statements(table, shape);
+
+  const seeded = (
+    await pool.request().input("t", sql.NVarChar(64), table.name).query("SELECT TOP 1 1 AS x FROM dbo.__live_sync_rows WHERE table_name = @t")
+  ).recordset.length > 0;
+
+  const changed = (
+    await pool.request().input("t", sql.NVarChar(64), table.name).query(`
+      SELECT x.k, x.h FROM (${st.hashes}) x
+      WHERE NOT EXISTS (SELECT 1 FROM dbo.__live_sync_rows r WHERE r.table_name = @t AND r.row_key = x.k AND r.row_hash = x.h)`)
+  ).recordset as Changed[];
+  const changedCount = changed.length;
+  let conflictCount = 0;
+  let conflictDetails: string[] = [];
+  let applicable = changed;
+  if (changed.length) {
+    const detected = await conflictingRows(pool, table, changed);
+    if (detected.rows.length) {
+      conflictCount = detected.rows.length;
+      conflictDetails = detected.details;
+      const conflictKeys = new Set(detected.rows.map((item) => item.k.toLowerCase()));
+      applicable = changed.filter((row) => !conflictKeys.has(row.k.toLowerCase()));
+    }
+  }
+
+  if (!applicable.length) {
+    return {
+      changed: changedCount,
+      inserted: 0,
+      updated: 0,
+      conflicts: conflictCount,
+      conflictDetails,
+      ...(seeded ? {} : { seeded: changedCount, notInApp: Number((await pool.request().query(st.missingInApp)).recordset[0]?.n || 0) }),
+    };
+  }
+
+  const withCounts = (inserted: number, updated: number): Result => ({
+    changed: changedCount,
+    inserted,
+    updated,
+    conflicts: conflictCount,
+    conflictDetails,
+    ...(seeded ? {} : { seeded: changedCount, notInApp: Number(0) }),
+  });
+
+  try {
+    const result = await applyBatch(pool, table, st.apply, applicable);
+    const summary = withCounts(result.inserted, result.updated);
+    if (!seeded) summary.notInApp = Number((await pool.request().query(st.missingInApp)).recordset[0]?.n || 0);
+    return summary;
+  } catch (err: any) {
+    console.warn(`  ${table.name.padEnd(26)} batch rejected (${err?.message || err}); applying row by row`);
+  }
+  const res = withCounts(0, 0);
+  for (const row of applicable) {
+    try {
+      const r = await applyBatch(pool, table, st.apply, [row]);
+      res.inserted += r.inserted;
+      res.updated += r.updated;
+    } catch (err: any) {
+      res.conflicts++;
+      console.warn(`  ${table.name.padEnd(26)} deferred Live row ${row.k} until the next run: ${err?.message || err}`);
+    }
+  }
+  if (!seeded) res.notInApp = Number((await pool.request().query(st.missingInApp)).recordset[0]?.n || 0);
+  return res;
 }
 
 async function syncProductBankSetting(pool: Pool) {
@@ -199,140 +500,7 @@ async function syncProductBankSetting(pool: Pool) {
   return { added, updated, preserved: Object.keys(targetConfig).filter((product) => !(product in sourceConfig)).length };
 }
 
-async function conflictingRows(pool: Pool, table: TableDef, changed: Changed[]) {
-  const conflictQueries: Record<string, string> = {
-    employees: `
-      SELECT CONVERT(nvarchar(200), s.id) AS k, CONVERT(nvarchar(200), s.employee_id) AS detail
-      FROM [${SOURCE}].dbo.employees s
-      JOIN dbo.employees d
-        ON s.employee_id COLLATE DATABASE_DEFAULT = d.employee_id COLLATE DATABASE_DEFAULT
-       AND s.id <> d.id`,
-    candidate_sessions: `
-      SELECT CONVERT(nvarchar(200), s.id) AS k, CAST(NULL AS nvarchar(200)) AS detail
-      FROM [${SOURCE}].dbo.candidate_sessions s
-      WHERE (s.resume_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dbo.resumes r WHERE r.id = s.resume_id))
-         OR (s.email IS NOT NULL AND EXISTS (SELECT 1 FROM dbo.candidate_sessions d WHERE d.email = s.email AND d.id <> s.id))
-         OR (s.code IS NOT NULL AND EXISTS (SELECT 1 FROM dbo.candidate_sessions d WHERE d.code = s.code AND d.id <> s.id))`,
-    tests: `
-      SELECT CONVERT(nvarchar(200), s.id) AS k, CAST(NULL AS nvarchar(200)) AS detail
-      FROM [${SOURCE}].dbo.tests s
-      WHERE NOT EXISTS (SELECT 1 FROM dbo.employees e WHERE e.id = s.employee_id)
-         OR EXISTS (SELECT 1 FROM dbo.tests d WHERE d.employee_id = s.employee_id AND d.topic_id = s.topic_id AND d.id <> s.id)`,
-    test_questions: `
-      SELECT CONVERT(nvarchar(200), s.id) AS k, CAST(NULL AS nvarchar(200)) AS detail
-      FROM [${SOURCE}].dbo.test_questions s
-      WHERE NOT EXISTS (SELECT 1 FROM dbo.tests t WHERE t.id = s.test_id)
-         OR EXISTS (SELECT 1 FROM dbo.test_questions d
-                    WHERE d.test_id = s.test_id AND d.question_index = s.question_index AND d.id <> s.id)`,
-    test_attempts: `
-      SELECT CONVERT(nvarchar(200), s.id) AS k, CAST(NULL AS nvarchar(200)) AS detail
-      FROM [${SOURCE}].dbo.test_attempts s
-      WHERE NOT EXISTS (SELECT 1 FROM dbo.tests t WHERE t.id = s.test_id)
-         OR NOT EXISTS (SELECT 1 FROM dbo.test_questions q WHERE q.id = s.question_id)
-         OR NOT EXISTS (SELECT 1 FROM dbo.employees e WHERE e.id = s.employee_id)`,
-  };
-  const query = conflictQueries[table.name];
-  if (!query) return { rows: [] as Changed[], details: [] as string[] };
-  const rows = (await pool.request().query(query)).recordset;
-  const changedKeys = new Set(changed.map((row) => row.k.toLowerCase()));
-  const byKey = new Map(changed.map((row) => [row.k.toLowerCase(), row]));
-  const conflicts = rows.filter((row) => changedKeys.has(String(row.k).toLowerCase()));
-  return {
-    rows: conflicts.map((row) => byKey.get(String(row.k).toLowerCase())!).filter(Boolean),
-    details: conflicts.flatMap((row) => row.detail == null ? [] : [String(row.detail)]),
-  };
-}
-
-async function syncTable(pool: Pool, table: TableDef): Promise<Result | string> {
-  if (table.pk.length !== 1) return "composite key, skipped";
-  const shape = await columnsFor(pool, table.name);
-  if (!shape) return "not in both databases, skipped";
-  if (!shape.cols.includes(table.pk[0])) return `key ${table.pk[0]} missing, skipped`;
-  if (shape.identity) return "identity column, skipped";
-  const st = statements(table, shape);
-
-  const seeded = (
-    await pool.request().input("t", sql.NVarChar(64), table.name).query("SELECT TOP 1 1 AS x FROM dbo.__live_sync_rows WHERE table_name = @t")
-  ).recordset.length > 0;
-
-  const changed = (
-    await pool.request().input("t", sql.NVarChar(64), table.name).query(`
-      SELECT x.k, x.h FROM (${st.hashes}) x
-      WHERE NOT EXISTS (SELECT 1 FROM dbo.__live_sync_rows r WHERE r.table_name = @t AND r.row_key = x.k AND r.row_hash = x.h)`)
-  ).recordset as Changed[];
-  const changedCount = changed.length;
-  let conflictCount = 0;
-  let conflictDetails: string[] = [];
-  let applicable = changed;
-  if (changed.length) {
-    const detected = await conflictingRows(pool, table, changed);
-    if (detected.rows.length) {
-      conflictCount = detected.rows.length;
-      conflictDetails = detected.details;
-      const conflictKeys = new Set(detected.rows.map((item) => item.k.toLowerCase()));
-      applicable = changed.filter((row) => !conflictKeys.has(row.k.toLowerCase()));
-      await recordOnly(pool, table, detected.rows);
-    }
-  }
-
-  if (!seeded) {
-    let inserted = 0;
-    let conflicts = conflictCount;
-    if (applicable.length) {
-      try {
-        const result = await applyBatch(pool, table, st.insertMissing, applicable);
-        inserted = result.inserted;
-      } catch (err: any) {
-        console.warn(`  ${table.name.padEnd(26)} bootstrap batch rejected (${err?.message || err}); applying row by row`);
-        for (const row of applicable) {
-          try {
-            const result = await applyBatch(pool, table, st.insertMissing, [row]);
-            inserted += result.inserted;
-          } catch (rowErr: any) {
-            conflicts++;
-            console.warn(`  ${table.name.padEnd(26)} kept the app's version of ${row.k}: ${rowErr?.message || rowErr}`);
-            await recordOnly(pool, table, [row]);
-          }
-        }
-      }
-    }
-    const notInApp = Number((await pool.request().query(st.missingInApp)).recordset[0]?.n || 0);
-    return {
-      changed: changedCount, inserted, updated: 0, conflicts, conflictDetails,
-      seeded: changedCount, notInApp,
-    };
-  }
-  if (!applicable.length) {
-    return { changed: changedCount, inserted: 0, updated: 0, conflicts: conflictCount, conflictDetails };
-  }
-
-  try {
-    return {
-      changed: changedCount, conflicts: conflictCount, conflictDetails,
-      ...(await applyBatch(pool, table, st.apply, applicable)),
-    };
-  } catch (err: any) {
-    console.warn(`  ${table.name.padEnd(26)} batch rejected (${err?.message || err}); applying row by row`);
-  }
-  const res: Result = {
-    changed: changedCount, inserted: 0, updated: 0,
-    conflicts: conflictCount, conflictDetails,
-  };
-  for (const row of applicable) {
-    try {
-      const r = await applyBatch(pool, table, st.apply, [row]);
-      res.inserted += r.inserted;
-      res.updated += r.updated;
-    } catch (err: any) {
-      res.conflicts++;
-      console.warn(`  ${table.name.padEnd(26)} kept the app's version of ${row.k}: ${err?.message || err}`);
-      await recordOnly(pool, table, [row]);
-    }
-  }
-  return res;
-}
-
-async function main() {
+async function syncOnce(): Promise<number> {
   if (!/^[A-Za-z0-9_]+$/.test(SOURCE)) throw new Error(`Invalid SYNC_SOURCE_DATABASE "${SOURCE}"`);
   const started = Date.now();
   const pool = await connect(resolveMssqlTarget());
@@ -344,6 +512,13 @@ async function main() {
     const state = await pool.request().query("SELECT OBJECT_ID(N'dbo.__live_sync_rows', N'U') AS id");
     if (!state.recordset[0]?.id) throw new Error("dbo.__live_sync_rows is missing; apply migration 007 first.");
     console.log(`[live-to-dev] ${new Date(started).toISOString()} ${SOURCE} -> ${target}${DRY_RUN ? " (dry run)" : ""}`);
+
+    const adopted = await adoptLiveIdentities(pool);
+    if (adopted.employees || adopted.tests || adopted.questions || adopted.sessions) {
+      console.log(
+        `  identity remap               employees ${adopted.employees}, tests ${adopted.tests}, questions ${adopted.questions}, sessions ${adopted.sessions}${DRY_RUN ? " (dry run, rolled back)" : ""}`
+      );
+    }
 
     const totals = { changed: 0, inserted: 0, updated: 0, conflicts: 0 };
     let failed = 0;
@@ -358,20 +533,21 @@ async function main() {
         if (r.seeded !== undefined) {
           totals.changed += r.changed;
           totals.inserted += r.inserted;
+          totals.updated += r.updated;
           totals.conflicts += r.conflicts;
           console.log(
-            `  ${table.name.padEnd(26)} bootstrap: recorded ${r.seeded} Live row(s), +${r.inserted} inserted${r.conflicts ? `, ${r.conflicts} kept as app data` : ""}${r.notInApp ? `; ${r.notInApp} Live row(s) remain missing` : ""}`
+            `  ${table.name.padEnd(26)} bootstrap: recorded ${r.seeded} Live row(s), +${r.inserted} inserted, ~${r.updated} updated${r.conflicts ? `, ${r.conflicts} waiting on a parent row` : ""}${r.notInApp ? `; ${r.notInApp} Live row(s) remain missing` : ""}`
           );
           continue;
         }
         for (const k of Object.keys(totals) as Array<keyof typeof totals>) totals[k] += r[k];
         if (r.changed || r.conflicts) {
           console.log(
-            `  ${table.name.padEnd(26)} ${String(r.changed).padStart(5)} changed in Live | +${r.inserted} inserted, ~${r.updated} updated${r.conflicts ? `, ${r.conflicts} kept as in app` : ""}`
+            `  ${table.name.padEnd(26)} ${String(r.changed).padStart(5)} changed in Live | +${r.inserted} inserted, ~${r.updated} updated${r.conflicts ? `, ${r.conflicts} waiting on a parent row` : ""}`
           );
         }
         if (r.conflictDetails?.length) {
-          console.warn(`  ${table.name.padEnd(26)} conflicting Employee IDs: ${[...new Set(r.conflictDetails)].join(", ")}`);
+          console.warn(`  ${table.name.padEnd(26)} notes: ${[...new Set(r.conflictDetails)].join(", ")}`);
         }
       } catch (err: any) {
         failed++;
@@ -391,12 +567,32 @@ async function main() {
     }
     const secs = ((Date.now() - started) / 1000).toFixed(1);
     console.log(
-      `[live-to-dev] ${DRY_RUN ? "dry run, rolled back" : "done"}: ${totals.changed} Live row(s) new/changed, +${totals.inserted} inserted, ~${totals.updated} updated, ${totals.conflicts} kept as in app${failed ? `, ${failed} table(s) failed` : ""}, ${secs}s`
+      `[live-to-dev] ${DRY_RUN ? "dry run, rolled back" : "done"}: ${totals.changed} Live row(s) new/changed, +${totals.inserted} inserted, ~${totals.updated} updated, ${totals.conflicts} waiting on a parent row${failed ? `, ${failed} table(s) failed` : ""}, ${secs}s`
     );
-    if (failed) process.exitCode = 1;
+    return failed;
   } finally {
     await pool.close();
   }
+}
+
+async function main() {
+  const minutes = intervalMinutes();
+  let stop = false;
+  const halt = () => {
+    stop = true;
+  };
+  process.on("SIGINT", halt);
+  process.on("SIGTERM", halt);
+  do {
+    const failed = await syncOnce();
+    if (failed) process.exitCode = 1;
+    if (!minutes || stop) break;
+    console.log(`[live-to-dev] next run in ${minutes} minute(s)`);
+    const deadline = Date.now() + minutes * 60_000;
+    while (!stop && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(1_000, deadline - Date.now())));
+    }
+  } while (!stop);
 }
 
 main().catch((err) => {

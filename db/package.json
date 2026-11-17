@@ -15,6 +15,7 @@
     "typecheck": "tsc --noEmit",
     "db:azure": "tsx scripts/migrate.ts migrate --target=azure && tsx scripts/deploy-data.ts --target=azure",
     "db:sync-live": "tsx scripts/sync-live-to-dev.ts",
+    "db:sync-live:loop": "tsx scripts/sync-live-to-dev.ts --interval-minutes=15",
     "supabase:start": "supabase --workdir supabase start",
     "supabase:stop": "supabase --workdir supabase stop",
     "supabase:status": "supabase --workdir supabase status",

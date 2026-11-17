@@ -72,6 +72,23 @@ Runs both migrations and baseline data deployment against local SQL Server:
 npm run db:local
 ```
 
+### Live → Dev sync
+
+`scripts/sync-live-to-dev.ts` copies new and changed rows from `TalentScope_DB_Live` into the app database. It never writes Live and never deletes Dev-only rows. Employee ID is the stable key: when the same employee exists in both databases under different GUIDs, Dev is remapped to Live (employees, then tests, questions, and sessions) and Live’s columns overwrite Dev.
+
+```powershell
+# One pass (uses MSSQL_TARGET from .env.local, or pass --target=remote)
+npm run db:sync-live
+
+# Preview without committing writes
+npm run db:sync-live -- --dry-run
+
+# Repeat on this machine every 15 minutes
+npm run db:sync-live:loop
+```
+
+Set `SYNC_INTERVAL_MINUTES` or `--interval-minutes=N` for a different cadence. On the development VM, `.github/workflows/sync-live-to-dev.yml` runs the same one-pass job every 15 minutes against `/opt/talentscope-dev/.env.local`.
+
 ## Data-preserving migration policy
 
 - Migrations are ordered by filename within their engine-specific directory. SQL Server and
