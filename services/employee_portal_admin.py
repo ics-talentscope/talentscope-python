@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from zipfile import BadZipFile
 
 from core.db import get_store
-from services import accounts, employee_tests, settings
+from services import accounts, employee_tests, settings, storage, test_video
 
 PRODUCTS_KEY = "employee_portal_products"
 MAX_QUESTION_BANK_SIZE = 5000
@@ -96,14 +96,25 @@ def _parse_wide_rows(rows: list[tuple], header: list[str]) -> list[dict]:
 
 def _parse_stacked_rows(rows: list[tuple], header: list[str]) -> list[dict]:
     q_idx = next((i for i, value in enumerate(header) if "question" in value), 3)
-    option_idx = next((i for i, value in enumerate(header) if value.startswith("option")), 4)
-    answer_idx = next((i for i, value in enumerate(header) if "answer" in value or "correct" in value or "✓" in value), 5)
+    answer_idx = next((i for i, value in enumerate(header) if "answer" in value or "correct" in value or "✓" in value), None)
+    if answer_idx is None:
+        markers = {"correct", "wrong", "incorrect", "yes", "no", "true", "false", "✓", "✔"}
+        marker_counts = [
+            sum(1 for row in rows if i < len(row) and _cell(row[i]).casefold() in markers)
+            for i in range(len(header))
+        ]
+        answer_idx = max(range(len(marker_counts)), key=marker_counts.__getitem__, default=None)
+        if answer_idx is not None and marker_counts[answer_idx] < 2:
+            answer_idx = None
+    option_idx = next((i for i, value in enumerate(header) if value.startswith("option")), None)
+    if option_idx is None:
+        option_idx = next((i for i, value in enumerate(header) if value == "a" and i not in (q_idx, answer_idx)), 4)
     groups: dict[str, dict] = {}
     current_question = ""
     for row in rows:
         question = _cell(row[q_idx]) if q_idx < len(row) else ""
         option = _cell(row[option_idx]) if option_idx < len(row) else ""
-        answer = _cell(row[answer_idx]).casefold() if answer_idx < len(row) else ""
+        answer = _cell(row[answer_idx]).casefold() if answer_idx is not None and answer_idx < len(row) else ""
         if question:
             current_question = question
         if not current_question or not option:
@@ -246,6 +257,46 @@ def assign_product_test(employee: dict, config: dict, rng=None) -> dict:
         for index, question in enumerate(chosen)
     ])
     return {"testId": test_id, "questionCount": count}
+
+
+def delete_portal_employees(employee_ids: list[str]) -> int:
+    ids = list(dict.fromkeys(str(employee_id or "").strip() for employee_id in employee_ids))
+    if not ids or any(not employee_id for employee_id in ids):
+        raise ValueError("Select at least one valid employee.")
+    if len(ids) > 500:
+        raise ValueError("Delete no more than 500 employees at a time.")
+
+    store = get_store()
+    employees = store.select(
+        "employees",
+        {"employee_id": ids},
+        ["id", "employee_id", "role", "product_qb_eligible"],
+    )
+    eligible = [
+        row for row in employees
+        if row.get("role") == "employee" and row.get("product_qb_eligible")
+    ]
+    if len(eligible) != len(ids):
+        found = {str(row["employee_id"]).casefold() for row in eligible}
+        missing = [employee_id for employee_id in ids if employee_id.casefold() not in found]
+        raise LookupError(f"Employee portal account(s) were not found: {', '.join(missing)}")
+
+    employee_uuids = [row["id"] for row in eligible]
+    tests = store.select("tests", {"employee_id": employee_uuids}, ["id"])
+    test_ids = [row["id"] for row in tests]
+    for test_id in test_ids:
+        test_video.delete(str(test_id))
+        storage.remove_prefix("backups", f"{test_id}-")
+
+    store.delete("test_attempts", {"employee_id": employee_uuids})
+    if test_ids:
+        store.delete("test_attempts", {"test_id": test_ids})
+        store.delete("test_questions", {"test_id": test_ids})
+        store.delete("tests", {"id": test_ids})
+    deleted = store.delete("employees", {"id": employee_uuids})
+    if deleted != len(eligible):
+        raise RuntimeError(f"Deleted {deleted} of {len(eligible)} selected employee portal accounts.")
+    return deleted
 
 
 def _assignment_uses_bank(test_id: str, bank_questions: list[dict]) -> bool:
@@ -442,7 +493,7 @@ def parse_employee_upload(content: bytes, filename: str, question_source: str | 
         "full_name": column("name", "emp name", "full name"),
         "email": column("nokia email id", "email", "email id", "employee email"),
         "designation": column("role", "designation", "job role"),
-        "product": column("product"),
+        "product": column("product", "product name"),
     }
     if any(indices[name] is None for name in ("employee_id", "full_name", "email")):
         raise ValueError("Roster columns must include Emp ID, Name, and Email. Role/Designation and Product are optional.")

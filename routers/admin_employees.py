@@ -12,7 +12,8 @@ from core.auth import acting_admin_email, require_any_permission, require_permis
 from core.config import env
 from core.db import get_store
 from core.errors import json_error, public_error
-from services import admin_accounts, corp_pool, docs_storage, portal_roster as pr, test_video
+from services import admin_accounts, corp_pool, docs_storage, employee_portal_admin as portal_admin
+from services import portal_roster as pr, test_video
 from services import employee_tests as et
 from services.products import format_topic_title_for_display
 from services.structured_log import write_log
@@ -25,7 +26,7 @@ router = APIRouter(
 )
 
 TEST_COLUMNS = ["id", "employee_id", "employee_code", "status", "topic_id", "subject_id", "difficulty", "total_questions", "score_correct",
-                "score_total", "score_percent", "session_recording_url", "proctoring", "started_at", "completed_at", "topic_title", "subject_title"]
+                "score_total", "score_percent", "session_recording_url", "proctoring", "started_at", "completed_at", "created_at", "topic_title", "subject_title"]
 EDITABLE = ("full_name", "email", "department", "skills", "designation", "grade", "status", "product")
 
 
@@ -60,7 +61,8 @@ def _test_results(store) -> list[dict]:
             "subjectTitle": test.get("subject_title") or "Unknown Subject", "difficulty": test.get("difficulty") or "medium",
             "totalQuestions": total, "status": test.get("status"), "answeredCount": 0, "correctCount": correct, "score": correct,
             "scorePercent": percent, "videoUrl": test.get("session_recording_url"), "proctoring": et.normalize_proctoring(test.get("proctoring")),
-            "startedAt": test.get("started_at"), "completedAt": test.get("completed_at"), "hasRecording": test["id"] in recordings,
+            "startedAt": test.get("started_at"), "completedAt": test.get("completed_at"), "createdAt": test.get("created_at"),
+            "hasRecording": test["id"] in recordings,
         })
     attempts = store.select("test_attempts", columns=["test_id"])
     counts: dict = {}
@@ -250,6 +252,33 @@ def delete_employees(body: dict = Body(default_factory=dict)):
     except Exception as err:
         write_log("employee", "DELETE_EMPLOYEE_FAILED", "failed", "Failed to delete employees")
         return public_error(err, "Failed to delete employees")
+
+
+@router.delete("/portal")
+def delete_portal_employee_accounts(
+    request: Request,
+    body: dict = Body(default_factory=dict),
+    _employee_portal_permission: None = Depends(require_permission("employeePortal")),
+):
+    employee_ids = body.get("employeeIds", body.get("ids"))
+    if not isinstance(employee_ids, list) or not employee_ids:
+        return json_error(400, "Employee IDs are required.")
+    try:
+        deleted = portal_admin.delete_portal_employees(employee_ids)
+    except ValueError as err:
+        return json_error(400, str(err))
+    except LookupError as err:
+        return json_error(404, str(err))
+    except Exception as err:
+        log.exception("Failed to delete employee portal accounts")
+        write_log("employee", "DELETE_EMPLOYEE_PORTAL_FAILED", "failed",
+                  "Failed to delete employee portal accounts")
+        return public_error(err, "Failed to delete employee portal accounts.")
+    write_log(
+        "employee", "DELETE_EMPLOYEE_PORTAL", "success",
+        f"Permanently deleted {deleted} employee portal account(s), assessments, answers, and stored videos.",
+    )
+    return {"success": True, "deleted": deleted}
 
 
 @router.get("/mapping-questions")

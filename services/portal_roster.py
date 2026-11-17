@@ -269,7 +269,11 @@ def merge_portal_data(profile_rows: list[dict], results: list[dict], manifest: d
     out = []
     for row in profile_rows:
         key = normalize_employee_id(row["employee_id"])
-        tests = [t for t in by_emp.get(key, []) if not str(t.get("topicId") or "").startswith(HISTORY_PREFIX)]
+        def assigned_at(test: dict) -> str:
+            return str(test.get("createdAt") or test.get("startedAt") or test.get("completedAt") or "")
+
+        all_tests = sorted(by_emp.get(key, []), key=lambda test: (assigned_at(test), str(test.get("id") or "")))
+        tests = [t for t in all_tests if not str(t.get("topicId") or "").startswith(HISTORY_PREFIX)]
         manifest_id = manifest.get(row["employee_id"]) or manifest.get(key)
         status_of = lambda t: str(t.get("status") or "").lower()
         completed = sorted((t for t in tests if status_of(t) == "completed"), key=lambda t: str(t.get("completedAt") or ""), reverse=True)
@@ -301,7 +305,7 @@ def merge_portal_data(profile_rows: list[dict], results: list[dict], manifest: d
                        "difficulty": t.get("difficulty"), "totalQuestions": t.get("totalQuestions"), "status": t.get("status"),
                        "score": t.get("correctCount") if t.get("correctCount") is not None else t.get("score"), "scoreMax": t.get("totalQuestions"),
                        "videoUrl": t.get("videoUrl"), "hasRecording": bool(t.get("hasRecording")), "proctoring": t.get("proctoring"),
-                       "startedAt": t.get("startedAt"), "completedAt": t.get("completedAt")} for t in tests],
+                       "startedAt": t.get("startedAt"), "completedAt": t.get("completedAt"), "createdAt": t.get("createdAt")} for t in all_tests],
         })
     return out
 

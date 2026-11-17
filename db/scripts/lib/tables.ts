@@ -16,6 +16,7 @@ export type TableDef = {
  */
 export const TABLES: TableDef[] = [
   { name: "employees", pk: ["id"] },
+  { name: "employee_portal_question_bank", pk: ["id"] },
   { name: "resumes", pk: ["id"] },
   { name: "job_descriptions", pk: ["id"] },
   { name: "portal_settings", pk: ["key"] },

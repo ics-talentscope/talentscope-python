@@ -266,7 +266,7 @@ def _option_label(index: int) -> str:
     return chr(65 + index)
 
 
-def question_attempts_batch(test_ids: list[str]) -> dict[str, list[dict]]:
+def question_attempts_batch(test_ids: list[str], include_unanswered: bool = False) -> dict[str, list[dict]]:
     ids = list(dict.fromkeys(i for i in test_ids if i))
     if not ids:
         return {}
@@ -277,7 +277,7 @@ def question_attempts_batch(test_ids: list[str]) -> dict[str, list[dict]]:
     out: dict[str, list[dict]] = {i: [] for i in ids}
     for q in sorted(questions, key=lambda r: (r["test_id"], r["question_index"])):
         attempt = by_question.get(str(q["id"]))
-        if not attempt:
+        if not attempt and not include_unanswered:
             continue
         selected = attempt.get("selected_option_index") if attempt else None
         options = q.get("options") or []

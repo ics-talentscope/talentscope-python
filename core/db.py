@@ -293,7 +293,8 @@ class MssqlStore(Store):
         conn.add_output_converter(pyodbc.SQL_CHAR, _str_converter)
         conn.add_output_converter(pyodbc.SQL_VARCHAR, _str_converter)
         conn.add_output_converter(pyodbc.SQL_LONGVARCHAR, _str_converter)
-        conn.setencoding(encoding="utf-8")
+        conn.setencoding(encoding="utf-8", ctype=pyodbc.SQL_CHAR)
+        conn.setencoding(encoding="utf-16le", ctype=pyodbc.SQL_WCHAR)
         return conn
 
     def _acquire(self):

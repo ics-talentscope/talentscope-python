@@ -191,8 +191,9 @@ def test_admin_employee_test_attempts_and_video(client, store, admin, monkeypatc
                                   {"id": q0, "test_id": tid, "question_index": 0, "question_text": "A?", "options": ["x", "y"]}])
     store.seed("test_attempts", [{"id": "a", "test_id": tid, "question_id": q0, "selected_option_index": 1, "is_correct": True}])
     res = client.get(f"/api/admin/employee-tests/{tid}/attempts", headers=admin).json()
-    assert [q["question_text"] for q in res["questions"]] == ["A?"]
+    assert [q["question_text"] for q in res["questions"]] == ["A?", "B?"]
     assert res["questions"][0]["selected_option_text"] == "B) y"
+    assert res["questions"][1]["selected_option_text"] is None
     assert client.get("/api/admin/employee-tests/cccccccc-cccc-4ccc-8ccc-cccccccccc99/attempts", headers=admin).status_code == 404
     assert client.get(f"/api/admin/employee-tests/{tid}/video", headers=admin).status_code == 404
     from services import test_video

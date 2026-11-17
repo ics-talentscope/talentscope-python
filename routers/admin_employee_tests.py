@@ -25,7 +25,7 @@ def attempts(test_id: str):
         test = get_store().first("tests", {"id": tid}, ["id", "status"])
         if not test:
             return json_error(404, "Test not found")
-        return {"success": True, "testId": tid, "status": test["status"], "questions": et.question_attempts_batch([tid]).get(tid, [])}
+        return {"success": True, "testId": tid, "status": test["status"], "questions": et.question_attempts_batch([tid], include_unanswered=True).get(tid, [])}
     except Exception as err:
         return public_error(err, "Failed to load test attempts")
 

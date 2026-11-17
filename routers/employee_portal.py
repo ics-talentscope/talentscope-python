@@ -95,15 +95,17 @@ def assigned_test(employee: dict = Depends(require_employee)):
         return public_error(err, "Internal error")
 
 
-def _result_item(test: dict, topic_titles: dict, subject_titles: dict, correct: int) -> dict:
+def _result_item(test: dict, topic_titles: dict, subject_titles: dict, correct: int | None) -> dict:
     total = test.get("total_questions") or 25
     percent = test.get("score_percent")
+    accuracy = percent if percent is not None else (js_round(correct / total * 100) if correct is not None and total > 0 else None)
     return {
         "id": test["id"], "topic_id": test["topic_id"],
         "topic_title": format_topic_title_for_display(topic_titles.get(test["topic_id"]) or test.get("topic_title") or test["topic_id"]),
         "subject_id": test["subject_id"], "subject_title": subject_titles.get(test["subject_id"]) or test.get("subject_title") or test["subject_id"],
         "difficulty": test.get("difficulty"), "total_questions": test.get("total_questions"), "correct_answers": correct,
-        "accuracy_pct": percent if percent is not None else (js_round(correct / total * 100) if total > 0 else 0),
+        "accuracy_pct": accuracy, "status": test.get("status"),
+        "is_history": accounts.is_product_assessment_history_topic(test.get("topic_id")),
         "time_taken_seconds": 0, "started_at": test.get("started_at"), "completed_at": test.get("completed_at") or "",
         "topic_breakdown": [],
         "ai_analysis": test.get("ai_analysis") if isinstance(test.get("ai_analysis"), str) else (test.get("in_progress") if isinstance(test.get("in_progress"), str) else ""),
@@ -121,9 +123,10 @@ def results(request: Request, employee: dict = Depends(require_employee)):
         if not emp_uuid:
             return []
         store = get_store()
-        tests = store.select("tests", {"employee_id": emp_uuid, "status": "completed"},
+        tests = store.select("tests", {"employee_id": emp_uuid},
                              ["id", "topic_id", "subject_id", "difficulty", "total_questions", "started_at", "completed_at", "in_progress",
-                              "score_correct", "score_percent", "ai_analysis", "topic_title", "subject_title"], "completed_at desc")
+                              "score_correct", "score_percent", "ai_analysis", "topic_title", "subject_title", "status"], "completed_at desc")
+        tests = [t for t in tests if t.get("status") == "completed" or accounts.is_product_assessment_history_topic(t.get("topic_id"))]
         if not tests:
             return []
         topic_titles = {r["id"]: r["title"] for r in store.select("learning_topics", {"id": list({t["topic_id"] for t in tests if _is_uuid(t["topic_id"])})}, ["id", "title"])}
@@ -132,8 +135,12 @@ def results(request: Request, employee: dict = Depends(require_employee)):
         correct_by_test: dict = {}
         for a in attempts:
             correct_by_test[a["test_id"]] = correct_by_test.get(a["test_id"], 0) + (1 if a["is_correct"] else 0)
-        return [_result_item(t, topic_titles, subject_titles,
-                             t["score_correct"] if t.get("score_correct") is not None else correct_by_test.get(t["id"], 0)) for t in tests]
+        return [_result_item(
+            t, topic_titles, subject_titles,
+            t["score_correct"] if t.get("score_correct") is not None
+            else correct_by_test.get(t["id"], 0) if t.get("status") == "completed" or t["id"] in correct_by_test
+            else None,
+        ) for t in tests]
     except Exception as err:
         return public_error(err, "Failed to load results")
 

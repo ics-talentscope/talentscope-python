@@ -38,6 +38,15 @@ def test_list_and_get(client, world):
     assert all("correct_option_index" not in question for question in started["questions"])
 
 
+def test_question_attempt_details_can_include_unanswered_assigned_questions(world, store):
+    assert et.question_attempts_batch([TEST_ID])[TEST_ID] == []
+
+    details = et.question_attempts_batch([TEST_ID], include_unanswered=True)[TEST_ID]
+
+    assert [question["question_text"] for question in details] == ["Q0", "Q1", "Q2"]
+    assert all(question["selected_option_text"] is None for question in details)
+
+
 def test_other_employees_test_is_hidden(client, world, store):
     store.seed("employees", [{"id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "employee_id": "EMP2", "email": "e2@x.com", "full_name": "E Two"}])
     other = {"Authorization": "Bearer " + sign_token("EMP2")}
@@ -114,6 +123,7 @@ def test_product_assessment_reset_archives_history(client, world, store, monkeyp
     assert [question["id"] for question in shuffled] == [Q[2], Q[1], Q[0]]
     assert shuffled[0]["options"] == ["d", "c", "b", "a"]
     assert shuffled[0]["correct_option_index"] == 2
+    assert all(question["options"][question["correct_option_index"]] == "b" for question in shuffled)
     history = [t for t in store.select("tests") if t["topic_id"].startswith("resource-product-assessment-history")][0]
     assert len(store.select("test_questions", {"test_id": history["id"]})) == 3
     assert client.delete(f"/api/employee/tests/{history['id']}", headers=world).status_code == 403

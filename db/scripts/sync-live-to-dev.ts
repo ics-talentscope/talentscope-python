@@ -5,7 +5,8 @@
  * A Live row is copied when it is new or its contents changed since it was last copied (SHA-256 of the row,
  * kept in dbo.__live_sync_rows). Rows the app changed itself stay as they are until Live changes them again;
  * a Live row that clashes with app data (unique key, missing parent) is skipped and logged once.
- * The first run of a table only records the current Live rows, so it never overwrites existing app data.
+ * The first run inserts missing Live rows and records all source hashes, without overwriting existing app data.
+ * Product-bank settings are merged with Live taking precedence for shared products; Dev-only products are retained.
  *
  * Usage: tsx scripts/sync-live-to-dev.ts [--tables=a,b] [--dry-run]
  * Env: MSSQL_* (app database, the target), SYNC_SOURCE_DATABASE (default TalentScope_DB_Live).
@@ -22,11 +23,20 @@ const SOURCE = process.env.SYNC_SOURCE_DATABASE || "TalentScope_DB_Live";
 const DRY_RUN = argv.includes("--dry-run");
 /** Owned by the VM app (Corp Pool roster, admin settings). */
 const EXCLUDED = new Set(["portal_settings"]);
+const PRODUCT_BANK_SETTING = "employee_portal_products";
 const SKIP_TYPES = ["timestamp", "xml", "text", "ntext", "image", "sql_variant", "geography", "geometry", "hierarchyid"];
 
 type Pool = sql.ConnectionPool;
 type Changed = { k: string; h: Buffer };
-type Result = { changed: number; inserted: number; updated: number; conflicts: number; seeded?: number; notInApp?: number };
+type Result = {
+  changed: number;
+  inserted: number;
+  updated: number;
+  conflicts: number;
+  conflictDetails?: string[];
+  seeded?: number;
+  notInApp?: number;
+};
 
 type Shape = { cols: string[]; identity: boolean; textual: Set<string> };
 
@@ -59,21 +69,29 @@ function statements(table: TableDef, shape: Shape) {
   const key = (alias: string) => `CONVERT(nvarchar(200), ${alias}.${quoteIdent(pk)}) COLLATE DATABASE_DEFAULT`;
   const hash = `HASHBYTES('SHA2_256', (SELECT ${q.map((c) => `s.${c}`).join(", ")} FOR JSON PATH, WITHOUT_ARRAY_WRAPPER, INCLUDE_NULL_VALUES))`;
   const join = `d.${quoteIdent(pk)} = ${srcCol(pk)}`;
+  const sourceScope = table.name === "portal_settings" ? `s.${quoteIdent(pk)} = N'${PRODUCT_BANK_SETTING}'` : "1=1";
   const update = nonKey.length
     ? `UPDATE d SET ${nonKey.map((c) => `d.${quoteIdent(c)} = s.${quoteIdent(c)}`).join(", ")}
        FROM ${dst} d JOIN ${src} s ON ${join} JOIN #chg c ON c.k = ${key("s")}
-       WHERE EXISTS (SELECT ${nonKey.map(srcCol).join(", ")} EXCEPT SELECT ${nonKey.map((c) => `d.${quoteIdent(c)}`).join(", ")});`
+       WHERE ${sourceScope} AND EXISTS (SELECT ${nonKey.map(srcCol).join(", ")} EXCEPT SELECT ${nonKey.map((c) => `d.${quoteIdent(c)}`).join(", ")});`
     : "";
   return {
-    hashes: `SELECT ${key("s")} AS k, ${hash} AS h FROM ${src} s`,
-    missingInApp: `SELECT COUNT(*) AS n FROM ${src} s WHERE NOT EXISTS (SELECT 1 FROM ${dst} d WHERE ${join})`,
+    hashes: `SELECT ${key("s")} AS k, ${hash} AS h FROM ${src} s WHERE ${sourceScope}`,
+    missingInApp: `SELECT COUNT(*) AS n FROM ${src} s WHERE ${sourceScope} AND NOT EXISTS (SELECT 1 FROM ${dst} d WHERE ${join})`,
+    insertMissing: `
+      DECLARE @inserted int = 0;
+      INSERT INTO ${dst} (${q.join(", ")})
+      SELECT ${q.map((c) => `s.${c}`).join(", ")} FROM ${src} s JOIN #chg c ON c.k = ${key("s")}
+      WHERE ${sourceScope} AND NOT EXISTS (SELECT 1 FROM ${dst} d WHERE ${join});
+      SET @inserted = @@ROWCOUNT;
+      SELECT 0 AS updated, @inserted AS inserted;`,
     apply: `
       DECLARE @updated int = 0, @inserted int = 0;
       ${update}
       SET @updated = @@ROWCOUNT;
       INSERT INTO ${dst} (${q.join(", ")})
       SELECT ${q.map((c) => `s.${c}`).join(", ")} FROM ${src} s JOIN #chg c ON c.k = ${key("s")}
-      WHERE NOT EXISTS (SELECT 1 FROM ${dst} d WHERE ${join});
+      WHERE ${sourceScope} AND NOT EXISTS (SELECT 1 FROM ${dst} d WHERE ${join});
       SET @inserted = @@ROWCOUNT;
       SELECT @updated AS updated, @inserted AS inserted;`,
   };
@@ -129,6 +147,102 @@ async function recordOnly(pool: Pool, table: TableDef, rows: Changed[]) {
   }
 }
 
+async function syncProductBankSetting(pool: Pool) {
+  const key = PRODUCT_BANK_SETTING;
+  const sourceRows = await pool.request().input("key", sql.NVarChar(200), key).query(`
+    SELECT [value] FROM [${SOURCE}].dbo.portal_settings WHERE [key] = @key`);
+  if (!sourceRows.recordset[0]?.value) {
+    throw new Error(`Live portal setting ${key} is missing.`);
+  }
+  const targetRows = await pool.request().input("key", sql.NVarChar(200), key).query(`
+    SELECT [value] FROM dbo.portal_settings WHERE [key] = @key`);
+  const parseConfig = (raw: unknown, database: string): Record<string, unknown> => {
+    if (raw == null || raw === "") return {};
+    let value: unknown;
+    try {
+      value = JSON.parse(String(raw));
+    } catch (err) {
+      throw new Error(`${database} portal setting ${key} is not valid JSON.`);
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`${database} portal setting ${key} must be a JSON object.`);
+    }
+    return value as Record<string, unknown>;
+  };
+  const sourceConfig = parseConfig(sourceRows.recordset[0].value, SOURCE);
+  const targetConfig = parseConfig(targetRows.recordset[0]?.value, "target");
+  const merged = { ...targetConfig, ...sourceConfig };
+  const value = JSON.stringify(merged);
+  if (targetRows.recordset[0]?.value === value) {
+    return { added: 0, updated: 0, preserved: Object.keys(targetConfig).filter((product) => !(product in sourceConfig)).length };
+  }
+
+  const tx = new sql.Transaction(pool);
+  await tx.begin();
+  try {
+    const request = new sql.Request(tx).input("key", sql.NVarChar(200), key).input("value", sql.NVarChar(sql.MAX), value);
+    await request.query(`
+      UPDATE dbo.portal_settings SET [value] = @value, updated_at = SYSUTCDATETIME() WHERE [key] = @key;
+      IF @@ROWCOUNT = 0
+        INSERT INTO dbo.portal_settings ([key], [value], updated_at) VALUES (@key, @value, SYSUTCDATETIME());`);
+    if (DRY_RUN) await tx.rollback();
+    else await tx.commit();
+  } catch (err) {
+    await tx.rollback().catch(() => {});
+    throw err;
+  }
+
+  const added = Object.keys(sourceConfig).filter((product) => !(product in targetConfig)).length;
+  const updated = Object.keys(sourceConfig).filter(
+    (product) => product in targetConfig && JSON.stringify(targetConfig[product]) !== JSON.stringify(sourceConfig[product])
+  ).length;
+  return { added, updated, preserved: Object.keys(targetConfig).filter((product) => !(product in sourceConfig)).length };
+}
+
+async function conflictingRows(pool: Pool, table: TableDef, changed: Changed[]) {
+  const conflictQueries: Record<string, string> = {
+    employees: `
+      SELECT CONVERT(nvarchar(200), s.id) AS k, CONVERT(nvarchar(200), s.employee_id) AS detail
+      FROM [${SOURCE}].dbo.employees s
+      JOIN dbo.employees d
+        ON s.employee_id COLLATE DATABASE_DEFAULT = d.employee_id COLLATE DATABASE_DEFAULT
+       AND s.id <> d.id`,
+    candidate_sessions: `
+      SELECT CONVERT(nvarchar(200), s.id) AS k, CAST(NULL AS nvarchar(200)) AS detail
+      FROM [${SOURCE}].dbo.candidate_sessions s
+      WHERE (s.resume_id IS NOT NULL AND NOT EXISTS (SELECT 1 FROM dbo.resumes r WHERE r.id = s.resume_id))
+         OR (s.email IS NOT NULL AND EXISTS (SELECT 1 FROM dbo.candidate_sessions d WHERE d.email = s.email AND d.id <> s.id))
+         OR (s.code IS NOT NULL AND EXISTS (SELECT 1 FROM dbo.candidate_sessions d WHERE d.code = s.code AND d.id <> s.id))`,
+    tests: `
+      SELECT CONVERT(nvarchar(200), s.id) AS k, CAST(NULL AS nvarchar(200)) AS detail
+      FROM [${SOURCE}].dbo.tests s
+      WHERE NOT EXISTS (SELECT 1 FROM dbo.employees e WHERE e.id = s.employee_id)
+         OR EXISTS (SELECT 1 FROM dbo.tests d WHERE d.employee_id = s.employee_id AND d.topic_id = s.topic_id AND d.id <> s.id)`,
+    test_questions: `
+      SELECT CONVERT(nvarchar(200), s.id) AS k, CAST(NULL AS nvarchar(200)) AS detail
+      FROM [${SOURCE}].dbo.test_questions s
+      WHERE NOT EXISTS (SELECT 1 FROM dbo.tests t WHERE t.id = s.test_id)
+         OR EXISTS (SELECT 1 FROM dbo.test_questions d
+                    WHERE d.test_id = s.test_id AND d.question_index = s.question_index AND d.id <> s.id)`,
+    test_attempts: `
+      SELECT CONVERT(nvarchar(200), s.id) AS k, CAST(NULL AS nvarchar(200)) AS detail
+      FROM [${SOURCE}].dbo.test_attempts s
+      WHERE NOT EXISTS (SELECT 1 FROM dbo.tests t WHERE t.id = s.test_id)
+         OR NOT EXISTS (SELECT 1 FROM dbo.test_questions q WHERE q.id = s.question_id)
+         OR NOT EXISTS (SELECT 1 FROM dbo.employees e WHERE e.id = s.employee_id)`,
+  };
+  const query = conflictQueries[table.name];
+  if (!query) return { rows: [] as Changed[], details: [] as string[] };
+  const rows = (await pool.request().query(query)).recordset;
+  const changedKeys = new Set(changed.map((row) => row.k.toLowerCase()));
+  const byKey = new Map(changed.map((row) => [row.k.toLowerCase(), row]));
+  const conflicts = rows.filter((row) => changedKeys.has(String(row.k).toLowerCase()));
+  return {
+    rows: conflicts.map((row) => byKey.get(String(row.k).toLowerCase())!).filter(Boolean),
+    details: conflicts.flatMap((row) => row.detail == null ? [] : [String(row.detail)]),
+  };
+}
+
 async function syncTable(pool: Pool, table: TableDef): Promise<Result | string> {
   if (table.pk.length !== 1) return "composite key, skipped";
   const shape = await columnsFor(pool, table.name);
@@ -146,21 +260,65 @@ async function syncTable(pool: Pool, table: TableDef): Promise<Result | string> 
       SELECT x.k, x.h FROM (${st.hashes}) x
       WHERE NOT EXISTS (SELECT 1 FROM dbo.__live_sync_rows r WHERE r.table_name = @t AND r.row_key = x.k AND r.row_hash = x.h)`)
   ).recordset as Changed[];
+  const changedCount = changed.length;
+  let conflictCount = 0;
+  let conflictDetails: string[] = [];
+  let applicable = changed;
+  if (changed.length) {
+    const detected = await conflictingRows(pool, table, changed);
+    if (detected.rows.length) {
+      conflictCount = detected.rows.length;
+      conflictDetails = detected.details;
+      const conflictKeys = new Set(detected.rows.map((item) => item.k.toLowerCase()));
+      applicable = changed.filter((row) => !conflictKeys.has(row.k.toLowerCase()));
+      await recordOnly(pool, table, detected.rows);
+    }
+  }
 
   if (!seeded) {
-    if (changed.length) await recordOnly(pool, table, changed);
+    let inserted = 0;
+    let conflicts = conflictCount;
+    if (applicable.length) {
+      try {
+        const result = await applyBatch(pool, table, st.insertMissing, applicable);
+        inserted = result.inserted;
+      } catch (err: any) {
+        console.warn(`  ${table.name.padEnd(26)} bootstrap batch rejected (${err?.message || err}); applying row by row`);
+        for (const row of applicable) {
+          try {
+            const result = await applyBatch(pool, table, st.insertMissing, [row]);
+            inserted += result.inserted;
+          } catch (rowErr: any) {
+            conflicts++;
+            console.warn(`  ${table.name.padEnd(26)} kept the app's version of ${row.k}: ${rowErr?.message || rowErr}`);
+            await recordOnly(pool, table, [row]);
+          }
+        }
+      }
+    }
     const notInApp = Number((await pool.request().query(st.missingInApp)).recordset[0]?.n || 0);
-    return { changed: 0, inserted: 0, updated: 0, conflicts: 0, seeded: changed.length, notInApp };
+    return {
+      changed: changedCount, inserted, updated: 0, conflicts, conflictDetails,
+      seeded: changedCount, notInApp,
+    };
   }
-  if (!changed.length) return { changed: 0, inserted: 0, updated: 0, conflicts: 0 };
+  if (!applicable.length) {
+    return { changed: changedCount, inserted: 0, updated: 0, conflicts: conflictCount, conflictDetails };
+  }
 
   try {
-    return { changed: changed.length, conflicts: 0, ...(await applyBatch(pool, table, st.apply, changed)) };
+    return {
+      changed: changedCount, conflicts: conflictCount, conflictDetails,
+      ...(await applyBatch(pool, table, st.apply, applicable)),
+    };
   } catch (err: any) {
     console.warn(`  ${table.name.padEnd(26)} batch rejected (${err?.message || err}); applying row by row`);
   }
-  const res: Result = { changed: changed.length, inserted: 0, updated: 0, conflicts: 0 };
-  for (const row of changed) {
+  const res: Result = {
+    changed: changedCount, inserted: 0, updated: 0,
+    conflicts: conflictCount, conflictDetails,
+  };
+  for (const row of applicable) {
     try {
       const r = await applyBatch(pool, table, st.apply, [row]);
       res.inserted += r.inserted;
@@ -189,7 +347,8 @@ async function main() {
 
     const totals = { changed: 0, inserted: 0, updated: 0, conflicts: 0 };
     let failed = 0;
-    for (const table of selectTables(argValue(argv, "tables")).filter((t) => !EXCLUDED.has(t.name))) {
+    const selected = selectTables(argValue(argv, "tables"));
+    for (const table of selected.filter((t) => !EXCLUDED.has(t.name))) {
       try {
         const r = await syncTable(pool, table);
         if (typeof r === "string") {
@@ -197,20 +356,37 @@ async function main() {
           continue;
         }
         if (r.seeded !== undefined) {
+          totals.changed += r.changed;
+          totals.inserted += r.inserted;
+          totals.conflicts += r.conflicts;
           console.log(
-            `  ${table.name.padEnd(26)} first run: recorded ${r.seeded} Live row(s)${r.notInApp ? `; ${r.notInApp} Live row(s) not in the app database were left out` : ""}`
+            `  ${table.name.padEnd(26)} bootstrap: recorded ${r.seeded} Live row(s), +${r.inserted} inserted${r.conflicts ? `, ${r.conflicts} kept as app data` : ""}${r.notInApp ? `; ${r.notInApp} Live row(s) remain missing` : ""}`
           );
           continue;
         }
         for (const k of Object.keys(totals) as Array<keyof typeof totals>) totals[k] += r[k];
-        if (r.changed) {
+        if (r.changed || r.conflicts) {
           console.log(
             `  ${table.name.padEnd(26)} ${String(r.changed).padStart(5)} changed in Live | +${r.inserted} inserted, ~${r.updated} updated${r.conflicts ? `, ${r.conflicts} kept as in app` : ""}`
           );
         }
+        if (r.conflictDetails?.length) {
+          console.warn(`  ${table.name.padEnd(26)} conflicting Employee IDs: ${[...new Set(r.conflictDetails)].join(", ")}`);
+        }
       } catch (err: any) {
         failed++;
         console.error(`  ${table.name.padEnd(26)} FAILED: ${err?.message || err}`);
+      }
+    }
+    if (selected.some((table) => table.name === "employee_portal_question_bank")) {
+      try {
+        const setting = await syncProductBankSetting(pool);
+        console.log(
+          `  ${PRODUCT_BANK_SETTING.padEnd(26)} merged from Live: +${setting.added} product(s), ~${setting.updated} updated, ${setting.preserved} Dev-only preserved${DRY_RUN ? " (dry run)" : ""}`
+        );
+      } catch (err: any) {
+        failed++;
+        console.error(`  ${PRODUCT_BANK_SETTING.padEnd(26)} FAILED: ${err?.message || err}`);
       }
     }
     const secs = ((Date.now() - started) / 1000).toFixed(1);

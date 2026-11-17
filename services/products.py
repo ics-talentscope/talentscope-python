@@ -14,6 +14,7 @@ def format_topic_title_for_display(title) -> str:
     if not title:
         return ""
     trimmed = str(title).strip()
+    trimmed = re.sub(r"\s+\(previous(?: attempt)?\)$", "", trimmed, flags=re.I)
     if re.match(r"^\[[^\]]+\]", trimmed):
-        return str(title)
-    return format_product_display_name(title)
+        return trimmed
+    return format_product_display_name(trimmed)

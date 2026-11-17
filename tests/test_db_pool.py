@@ -98,3 +98,32 @@ def test_exhausted_pool_raises_instead_of_hanging(pooled):
         store.slots.acquire()
     with pytest.raises(RuntimeError):
         store.query("SELECT 1")
+
+
+def test_connection_uses_unicode_encoding_for_wide_parameters(monkeypatch):
+    class EncodingConn:
+        def __init__(self):
+            self.encodings = []
+
+        def add_output_converter(self, *_args):
+            pass
+
+        def setencoding(self, **kwargs):
+            self.encodings.append(kwargs)
+
+    conn = EncodingConn()
+    fake = types.SimpleNamespace(
+        SQL_CHAR=1, SQL_VARCHAR=2, SQL_LONGVARCHAR=3, SQL_WCHAR=4,
+        connect=lambda *_args, **_kwargs: conn,
+    )
+    monkeypatch.setitem(sys.modules, "pyodbc", fake)
+    store = MssqlStore({
+        "server": "x", "port": 1, "database": "d", "user": "u", "password": "p",
+        "encrypt": True, "trust_cert": True, "driver": "d",
+    })
+
+    assert store._connect() is conn
+    assert conn.encodings == [
+        {"encoding": "utf-8", "ctype": fake.SQL_CHAR},
+        {"encoding": "utf-16le", "ctype": fake.SQL_WCHAR},
+    ]
