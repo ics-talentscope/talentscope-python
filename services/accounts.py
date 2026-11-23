@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from core import tenancy
 from core.db import get_store
 
 log = logging.getLogger("talentscope")
@@ -20,7 +21,7 @@ AI_QUESTIONNAIRE_PRODUCT = "AI Questionnaire"
 COLUMNS = [
     "employee_id", "full_name", "email", "department", "role", "is_first_login", "password_hash", "password_salt",
     "xp_points", "streak_days", "skill_level", "ai_readiness_score", "product", "designation", "product_qb_eligible",
-    "assessment_only", "email_verified",
+    "assessment_only", "email_verified", "client_id",
 ]
 
 
@@ -60,6 +61,7 @@ def map_row(row: dict) -> dict:
         "product": row.get("product") or None,
         "product_qb_eligible": bool(row.get("product_qb_eligible") or False),
         "assessment_only": bool(row.get("assessment_only") or False),
+        "client_id": tenancy.normalize_client(row.get("client_id")),
     }
 
 
@@ -124,6 +126,22 @@ def get_account_by_email(email: str) -> Optional[dict]:
         if row:
             return map_row(row)
     return None
+
+
+def find_accounts_any_client(employee_id: str = "", email: str = "") -> list[dict]:
+    """Lookup used only at sign-in, before the token establishes a client."""
+    with tenancy.unscoped():
+        if employee_id:
+            rows = get_store().select("employees", {"employee_id": employee_id.strip()}, COLUMNS)
+            return [map_row(row) for row in rows]
+        clean = (email or "").strip().lower()
+        for candidate in _email_lookup_candidates(clean):
+            found = [map_row(row) for row in get_store().select(
+                "employees", [("email", "ilike", candidate)], COLUMNS
+            )]
+            if found:
+                return found
+    return []
 
 
 def upsert_account(account: dict) -> bool:

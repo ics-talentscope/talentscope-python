@@ -2,6 +2,7 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from core import tenancy
 from core.config import UPLOAD_DIR
 from core.security import safe_storage_filename
 
@@ -11,7 +12,7 @@ CATEGORIES = ("BR", "JD", "Resumes", "Corp Pool", "Portal Mapping")
 def _dir(category: str) -> Path:
     if category not in CATEGORIES:
         raise ValueError(f"Unknown docs category: {category}")
-    return UPLOAD_DIR / "docs" / category
+    return tenancy.client_root(UPLOAD_DIR) / "docs" / category
 
 
 def usable(name: str) -> bool:

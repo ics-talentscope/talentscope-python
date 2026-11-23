@@ -11,6 +11,7 @@ import anyio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from core import tenancy
 from core.config import db_target, env, env_int, frontend_origins, mssql_settings
 from core.errors import install_error_handlers
 from core.logger import configure_logging, logger as structured_logger, run_log_archiver
@@ -30,19 +31,22 @@ RETENTION_INTERVAL_S = 6 * 3600
 def run_retention() -> None:
     days = env_int("RECORDING_RETENTION_DAYS", 0)
     while days > 0:
-        try:
-            removed = storage.prune_older_than("recordings", days)
-            if removed:
-                log.info("retention: removed %s recordings older than %s days", removed, days)
-        except Exception as err:
-            log.warning("retention sweep failed: %s", err)
+        for client in tenancy.CLIENTS:
+            try:
+                with tenancy.client_context(client):
+                    removed = storage.prune_older_than("recordings", days)
+                if removed:
+                    log.info("retention: removed %s %s recordings older than %s days", removed, client, days)
+            except Exception as err:
+                log.warning("retention sweep failed for %s: %s", client, err)
         time.sleep(RETENTION_INTERVAL_S)
 
 
 def run_system_log_retention() -> None:
     while True:
         try:
-            removed = system_logs.prune_logs()
+            with tenancy.unscoped():
+                removed = system_logs.prune_logs()
             if removed:
                 log.info("retention: removed %s expired system log entries", removed)
         except Exception:
@@ -53,13 +57,15 @@ def run_system_log_retention() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     anyio.to_thread.current_default_thread_limiter().total_tokens = env_int("API_THREADS", 24)
-    try:
-        if admin_accounts.ensure_console_password():
-            log.info("admin console password ready")
-        else:
-            log.warning("admin console password not setup (set ADMIN_PASSWORD)")
-    except Exception as err:
-        log.warning("admin console password bootstrap failed: %s", err)
+    for client in tenancy.CLIENTS:
+        try:
+            if admin_accounts.ensure_console_password(client):
+                log.info("%s admin console password ready", client)
+            else:
+                log.warning("%s admin console password not setup (set %s)",
+                            client, admin_accounts.ADMIN_PASSWORD_ENVS[client])
+        except Exception as err:
+            log.warning("%s admin console password bootstrap failed: %s", client, err)
     threading.Thread(target=run_retention, daemon=True, name="retention").start()
     threading.Thread(target=run_system_log_retention, daemon=True, name="system-log-retention").start()
     threading.Thread(

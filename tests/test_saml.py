@@ -212,9 +212,14 @@ def test_saml_status_reports_enabled_when_metadata_is_configured(client, monkeyp
 
 
 def test_acs_end_to_end(client, store, monkeypatch):
+    monkeypatch.setenv("SAML_ENABLED", "1")
     monkeypatch.setenv("SAML_ISSUER", ISSUER)
     monkeypatch.setenv("SAML_IDP_CERT", CERT_BODY)
     monkeypatch.setenv("SAML_ENTRY_POINT", "https://idp.test/saml2")
+    monkeypatch.setenv("SAML_IDP_METADATA_URL", "")
+    monkeypatch.setenv("SAML_IDP_ENTITY_ID", "https://idp.test")
+    # This test posts an IdP-initiated response without first calling /saml.
+    monkeypatch.setenv("SAML_ALLOW_IDP_INITIATED", "1")
     store.seed("employees", [{"id": "e1", "employee_id": "EMP9", "email": "jane.doe@corp.com", "full_name": "Jane", "role": "employee"}])
     res = client.post("/api/employee/auth/saml/acs", data={"SAMLResponse": build_response()}, follow_redirects=False)
     assert res.status_code == 303 and res.headers["location"].endswith("/employee/sso-complete")

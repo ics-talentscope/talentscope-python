@@ -5,6 +5,7 @@ from typing import Optional
 
 from fastapi import Request
 
+from core import tenancy
 from core.tokens import token_claims
 
 _current: ContextVar[Optional[dict]] = ContextVar("request_context", default=None)
@@ -18,6 +19,7 @@ def bind(request: Request, ip: str) -> None:
     header = request.headers.get("authorization") or ""
     token = header[7:] if header.startswith("Bearer ") else header
     client = re.sub(r"[^A-Za-z0-9-]", "", request.headers.get("x-client-id") or "")[:64]
+    tenancy.set_client(tenancy.client_from_claims(token_claims(token) if token else None))
     _current.set({
         "ip": ip,
         "token": token,
@@ -68,6 +70,7 @@ def ip() -> Optional[str]:
 
 
 def _cached(key: str, load) -> str:
+    key = f"{tenancy.current_client()}:{key}"
     hit = _names.get(key)
     if hit and time.monotonic() - hit[0] < NAME_TTL_S:
         return hit[1]

@@ -34,7 +34,10 @@ def list_resumes(request: Request):
     email = acting_admin_email(request) or ""
     try:
         items = resumes.list_resumes()
-        if email and not admin_accounts.can_view_org_screening_data(email):
+        filter_email = str(request.query_params.get("email") or "").lower().strip()
+        if filter_email:
+            items = [r for r in items if str((r.get("report") or {}).get("rmEmail") or "").lower().strip() == filter_email]
+        elif email and not admin_accounts.can_view_org_screening_data(email):
             items = [r for r in items if str((r.get("report") or {}).get("rmEmail") or "").lower().strip() == email]
         attempts_by_resume: dict = {}
         try:
@@ -63,7 +66,7 @@ def batch_delete(request: Request, body: dict = Body(default_factory=dict)):
             return json_error(400, "Invalid candidate id")
         for resume_id in clean:
             resumes.delete_resume(resume_id)
-        audit.add_log("admin@infinite.com", "ADMIN_BATCH_DELETE_RESUMES", ", ".join(clean),
+        audit.add_log(admin_accounts.default_admin_email(), "ADMIN_BATCH_DELETE_RESUMES", ", ".join(clean),
                       f"Successfully batch deleted candidate CV IDs: {', '.join(clean)}", get_client_ip(request))
         write_log("candidate-processing", "BATCH_DELETE_CANDIDATES", "success", f"Batch deleted candidate CV IDs: {', '.join(clean)}")
         return {"success": True}
@@ -231,7 +234,7 @@ def invite(resume_id: str, request: Request, body: dict = Body(default_factory=d
             app_url(), label, candidate_password,
         )
         status, send_error = mailer.dispatch(email, subject, html)
-        rm_email = (resume.get("report") or {}).get("rmEmail") or "admin@infinite.com"
+        rm_email = (resume.get("report") or {}).get("rmEmail") or admin_accounts.default_admin_email()
         if status == "failed_real_fallback_simulated":
             mailer.record(
                 email, full_name, subject,
@@ -305,7 +308,7 @@ def reset_candidate_password(resume_id: str, request: Request):
             return json_error(503, send_error or "Could not deliver the password reset email.")
 
         sessions.save_candidate_password(email, rid, password)
-        rm_email = (resume.get("report") or {}).get("rmEmail") or "admin@infinite.com"
+        rm_email = (resume.get("report") or {}).get("rmEmail") or admin_accounts.default_admin_email()
         mailer.record(email, full_name, subject, html, status, rm_email)
         actor = acting_admin_email(request) or "unknown"
         audit.add_log(actor, "ADMIN_RESET_CANDIDATE_PASSWORD", email,

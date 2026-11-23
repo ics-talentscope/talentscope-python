@@ -270,7 +270,7 @@ def portal_summary_workbook(detail_workbook: bytes, source_name: str) -> bytes:
         ("Completed (took the test)", totals["completed"]),
         ("In Progress", totals["in_progress"]),
         ("Not Started", totals["not_started"]),
-        ("Completion %", totals["completion"] / 100),
+        ("Completion %", totals["completed"] / totals["scheduled"] if totals["scheduled"] else 0),
     ):
         overview.append([label, value])
     overview["B7"].fill = PatternFill("solid", fgColor="FFD9FBE8")

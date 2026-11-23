@@ -218,6 +218,26 @@ def update_employee(body: dict = Body(default_factory=dict)):
         return public_error(err, "Failed to update employee")
 
 
+@router.patch("/portal/{employee_id}", dependencies=[Depends(require_permission("employeePortal"))])
+def update_portal_employee_legacy(employee_id: str, request: Request, body: dict = Body(default_factory=dict)):
+    """Legacy table-action path kept for admin UI clients."""
+    from routers.admin_employee_portal import update_user
+
+    updates = body.get("updates") if isinstance(body.get("updates"), dict) else {}
+    payload = {key: value for key, value in updates.items() if key not in {"full_name"}}
+    if "full_name" in updates:
+        payload["name"] = updates["full_name"]
+    return update_user(employee_id, request, payload)
+
+
+@router.post("/portal/{employee_id}/reset-password", dependencies=[Depends(require_permission("employeePortal"))])
+def reset_portal_employee_password_legacy(employee_id: str, request: Request):
+    """Legacy table-action path kept for admin UI clients."""
+    from routers.admin_employee_portal import reset_user_password
+
+    return reset_user_password(employee_id, request)
+
+
 @router.delete("")
 def delete_employees(body: dict = Body(default_factory=dict)):
     employee_id, ids = body.get("employeeId"), body.get("ids")

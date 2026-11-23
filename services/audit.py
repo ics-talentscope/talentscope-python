@@ -3,6 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from core import tenancy
 from core.db import get_store
 
 log = logging.getLogger("talentscope")
@@ -40,6 +41,18 @@ def add_log(actor_email: str, action: str, target: str, details: str, ip_address
     module = "security" if failed or "ACCESS" in action.upper() or "PERMISSION" in action.upper() else "auth"
     record_business_event(module, action, "failed" if failed else "success", f"{target}: {details}", actor_email)
     return _map(record)
+
+
+def add_login_log(actor_email: str, action: str, target: str, details: str, ip_address: str = "") -> dict:
+    """Write a sign-in audit row under the client derived from the actor's email.
+
+    Login routes run before ``require_admin`` binds a request client, so they
+    must scope their audit writes explicitly; otherwise every client's logins
+    would land in the default (Infinite) tenant.
+    """
+    client = tenancy.client_for_email(actor_email) or tenancy.DEFAULT_CLIENT
+    with tenancy.client_context(client):
+        return add_log(actor_email, action, target, details, ip_address)
 
 
 def get_logs(limit: Optional[int] = None) -> list[dict]:

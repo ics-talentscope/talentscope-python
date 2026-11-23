@@ -1,6 +1,7 @@
 import logging
 from typing import Optional
 
+from core import tenancy
 from services import storage
 
 log = logging.getLogger("talentscope")
@@ -56,12 +57,9 @@ def _sql_get(bucket: str, path: str) -> Optional[bytes]:
     try:
         from core.db import get_store
 
-        rows = get_store().query(
-            "SELECT content FROM dbo.storage_objects WHERE bucket = ? AND path = ?",
-            (bucket, path),
-        )
+        rows = get_store().select("storage_objects", {"bucket": bucket, "path": path}, ["content"], limit=1)
     except Exception as err:
-        log.warning("Employee test video SQL read failed for %s/%s: %s", bucket, path, err)
+        log.warning("Employee test video storage read failed for %s/%s: %s", bucket, path, err)
         return None
     data = _as_bytes(rows[0].get("content")) if rows else b""
     return data or None
@@ -71,13 +69,11 @@ def _sql_exists(bucket: str, path: str) -> bool:
     try:
         from core.db import get_store
 
-        rows = get_store().query(
-            "SELECT 1 AS ok FROM dbo.storage_objects WHERE bucket = ? AND path = ? AND size_bytes > 0",
-            (bucket, path),
-        )
-        return bool(rows)
+        return bool(get_store().count("storage_objects", [
+            ("bucket", "eq", bucket), ("path", "eq", path), ("size_bytes", "gt", 0),
+        ]))
     except Exception as err:
-        log.warning("Employee test video SQL exists check failed for %s/%s: %s", bucket, path, err)
+        log.warning("Employee test video storage exists check failed for %s/%s: %s", bucket, path, err)
         return False
 
 
@@ -85,9 +81,9 @@ def _sql_delete(bucket: str, path: str) -> None:
     try:
         from core.db import get_store
 
-        get_store().execute("DELETE FROM dbo.storage_objects WHERE bucket = ? AND path = ?", (bucket, path))
+        get_store().delete("storage_objects", {"bucket": bucket, "path": path})
     except Exception as err:
-        log.warning("Employee test video SQL delete failed for %s/%s: %s", bucket, path, err)
+        log.warning("Employee test video storage delete failed for %s/%s: %s", bucket, path, err)
 
 
 def _sql_list_ids() -> set[str]:
@@ -95,16 +91,15 @@ def _sql_list_ids() -> set[str]:
     try:
         from core.db import get_store
 
-        rows = get_store().query(
-            """
-            SELECT bucket, path FROM dbo.storage_objects
-            WHERE (bucket = ? AND path LIKE '%.webm')
-               OR (bucket = ? AND path LIKE ?)
-            """,
-            (BUCKET, LEGACY_BUCKET, f"{LEGACY_PREFIX}%.webm"),
-        )
+        store = get_store()
+        rows = store.select("storage_objects", [
+            ("bucket", "eq", BUCKET), ("path", "like", "%.webm"),
+        ], ["bucket", "path"])
+        rows += store.select("storage_objects", [
+            ("bucket", "eq", LEGACY_BUCKET), ("path", "like", f"{LEGACY_PREFIX}%.webm"),
+        ], ["bucket", "path"])
     except Exception as err:
-        log.warning("Employee test video SQL list failed: %s", err)
+        log.warning("Employee test video storage list failed: %s", err)
         return ids
     for row in rows:
         path = str(row.get("path") or "")
@@ -119,7 +114,7 @@ def _sql_list_ids() -> set[str]:
 def _disk_list_ids() -> set[str]:
     try:
         ids: set[str] = set()
-        folder = storage.UPLOAD_DIR / BUCKET
+        folder = storage.bucket_dir(BUCKET, create=False)
         if not folder.is_dir():
             return ids
         for path in folder.iterdir():

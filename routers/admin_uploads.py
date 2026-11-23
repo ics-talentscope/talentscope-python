@@ -8,7 +8,7 @@ from core.auth import require_permission
 from core.db import get_store
 from core.errors import json_error, public_error
 from core.security import UPLOAD_ALLOWED_EXTS, get_client_ip, inspect_upload, is_rate_limited, validate_file_signature
-from services import audit, hr_files, resumes, sessions
+from services import admin_accounts, audit, hr_files, resumes, sessions
 from services.structured_log import write_log
 
 log = logging.getLogger("talentscope")
@@ -79,7 +79,7 @@ async def upload_bulk(request: Request, file: UploadFile = File(None), jdId: str
             return json_error(400, "File verification failed: invalid format or magic signature")
         force = forceReplace == "true"
         text = _jd_text(jdText or "", jdId or "", rmEmail or "")
-        actor = rmEmail or "admin@infinite.com"
+        actor = rmEmail or admin_accounts.default_admin_email()
         if is_zip:
             processed = []
             for base, payload in _zip_entries(data):

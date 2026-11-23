@@ -24,28 +24,29 @@ def login(request: Request, body: dict = Body(default_factory=dict)):
         password = as_password(body.get("password"), allow_empty=True)
         if password is None:
             return json_error(400, "Invalid request")
-        if not email or not email.endswith("@infinite.com"):
-            audit.add_log(email or "unknown", "ADMIN_LOGIN_FAILURE", "Admin Console", "Unauthorized email domain extension", ip)
-            return json_error(400, "Unauthorized domain. Please enter your @infinite.com email.")
+        if not email or not admin_accounts.is_admin_email(email):
+            audit.add_login_log(email or "unknown", "ADMIN_LOGIN_FAILURE", "Admin Console", "Unauthorized email domain extension", ip)
+            return json_error(400, "Unauthorized domain. Use your @infinite.com or @slalom.com email.")
         account_limit = is_rate_limited_any([f"auth:acct:{email}"], 5, 60_000)
         if account_limit.limited:
             return rate_limited_response(account_limit, "Too many login attempts. Please try again later.")
         try:
             access = admin_accounts.authenticate(email, password)
         except admin_accounts.AdminPasswordNotSetup:
-            audit.add_log(email, "ADMIN_LOGIN_FAILURE", "Admin Console", admin_accounts.ADMIN_PASSWORD_NOT_SETUP, ip)
+            audit.add_login_log(email, "ADMIN_LOGIN_FAILURE", "Admin Console", admin_accounts.ADMIN_PASSWORD_NOT_SETUP, ip)
             return json_error(503, admin_accounts.ADMIN_PASSWORD_NOT_SETUP)
         if not access:
-            audit.add_log(email, "ADMIN_LOGIN_FAILURE", "Admin Console", "Invalid password provided", ip)
+            audit.add_login_log(email, "ADMIN_LOGIN_FAILURE", "Admin Console", "Invalid password provided", ip)
             return json_error(401, "Invalid Password")
-        token = sign_token("admin", 60 * 60 * 1000, email=access["email"])
-        audit.add_log(
+        token = sign_token("admin", 60 * 60 * 1000, email=access["email"], client=access["client"])
+        audit.add_login_log(
             access["email"], "ADMIN_LOGIN_SUCCESS", "Admin Console",
-            "Admin session generated successfully" if access["canViewEmployeePortal"]
-            else "Admin session generated without Employee Portal access", ip,
+            f"{access['client']} admin session generated successfully" if access["canViewEmployeePortal"]
+            else f"{access['client']} admin session generated without Employee Portal access", ip,
         )
-        return {"status": "ok", "token": token, "email": access["email"], "isSuperAdmin": access["isSuperAdmin"],
-                "permissions": access["permissions"], "canViewEmployeePortal": access["canViewEmployeePortal"],
+        return {"status": "ok", "token": token, "email": access["email"], "client": access["client"],
+                "isSuperAdmin": access["isSuperAdmin"], "permissions": access["permissions"],
+                "canViewEmployeePortal": access["canViewEmployeePortal"],
                 "canChangePassword": access["canChangePassword"]}
     except Exception as err:
         return public_error(err, "Unable to sign in")
@@ -60,9 +61,10 @@ def refresh(request: Request, _: str = Depends(require_admin)):
     access = admin_accounts.get_access(email)
     if not any(access["permissions"].values()):
         return json_error(401, "Unauthorized")
-    token = sign_token("admin", 60 * 60 * 1000, email=access["email"])
-    return {"status": "ok", "token": token, "isSuperAdmin": access["isSuperAdmin"], "permissions": access["permissions"],
-            "canViewEmployeePortal": access["canViewEmployeePortal"], "canChangePassword": access["canChangePassword"]}
+    token = sign_token("admin", 60 * 60 * 1000, email=access["email"], client=access["client"])
+    return {"status": "ok", "token": token, "client": access["client"], "isSuperAdmin": access["isSuperAdmin"],
+            "permissions": access["permissions"], "canViewEmployeePortal": access["canViewEmployeePortal"],
+            "canChangePassword": access["canChangePassword"]}
 
 
 @router.get("/validate")
@@ -71,7 +73,8 @@ def validate(request: Request, _: str = Depends(require_admin)):
     if not email:
         return {"status": "ok"}
     access = admin_accounts.get_access(email)
-    return {"status": "ok", "email": access["email"], "isSuperAdmin": access["isSuperAdmin"], "permissions": access["permissions"],
+    return {"status": "ok", "email": access["email"], "client": access["client"],
+            "isSuperAdmin": access["isSuperAdmin"], "permissions": access["permissions"],
             "canViewEmployeePortal": access["canViewEmployeePortal"], "canChangePassword": access["canChangePassword"]}
 
 
@@ -136,8 +139,9 @@ def admin_sso_handoff(request: Request):
     ok = bool(claims and claims.get("employee_id") == "ADMIN" and claims.get("email"))
     if ok:
         access = admin_accounts.get_access(claims["email"])
-        body = {"status": "ok", "token": token, "email": access["email"], "isSuperAdmin": access["isSuperAdmin"],
-                "permissions": access["permissions"], "canViewEmployeePortal": access["canViewEmployeePortal"],
+        body = {"status": "ok", "token": token, "email": access["email"], "client": access["client"],
+                "isSuperAdmin": access["isSuperAdmin"], "permissions": access["permissions"],
+                "canViewEmployeePortal": access["canViewEmployeePortal"],
                 "canChangePassword": access["canChangePassword"]}
     else:
         body = {"error": "Microsoft sign-in session expired. Please try again."}

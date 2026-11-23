@@ -7,6 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 
+from core import tenancy
 from core.db import get_store
 
 ACCESS_CODE_TTL_SECONDS = 600
@@ -27,6 +28,7 @@ def _map(row: dict) -> dict:
         "used": bool(row.get("used")),
         "resumeId": row.get("resume_id") or None,
         "usedAt": row.get("used_at") or None,
+        "clientId": tenancy.normalize_client(row.get("client_id")),
     }
 
 
@@ -44,6 +46,29 @@ def get_session(code: str) -> Optional[dict]:
 def get_session_by_email(email: str) -> Optional[dict]:
     row = get_store().first("candidate_sessions", {"email": email.lower().strip()})
     return _map(row) if row else None
+
+
+def find_session_by_email_any_client(email: str) -> Optional[dict]:
+    """Pre-token lookup for the public interview sign-in flow."""
+    with tenancy.unscoped():
+        rows = get_store().select("candidate_sessions", {"email": email.lower().strip()})
+        if not rows:
+            return None
+        # Same email may exist in both clients: prefer the resume's client when
+        # there is more than one match.
+        if len(rows) == 1:
+            return _map(rows[0])
+        for row in rows:
+            resume = get_store().first("resumes", {"id": row.get("resume_id")}, ["client_id"])
+            if resume and resume.get("client_id"):
+                return {**_map(row), "clientId": tenancy.normalize_client(resume["client_id"])}
+        return _map(rows[0])
+
+
+def find_resume_client(resume_id: str) -> Optional[str]:
+    with tenancy.unscoped():
+        row = get_store().first("resumes", {"id": resume_id}, ["client_id"])
+    return tenancy.normalize_client(row.get("client_id")) if row else None
 
 
 def mark_session_used(code: str, resume_id: str) -> dict:

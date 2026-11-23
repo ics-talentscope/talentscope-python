@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from core import tenancy
 from core.config import UPLOAD_DIR, env
 
 log = logging.getLogger("talentscope")
@@ -80,18 +81,20 @@ def _sql_put(bucket: str, path: str, data: bytes) -> None:
 
         content_type = _content_type(path)
         size = len(data)
+        client = tenancy.current_client()
         get_store().execute(
             """
             MERGE dbo.storage_objects WITH (HOLDLOCK) AS target
-            USING (SELECT ? AS bucket, ? AS path) AS source
+            USING (SELECT ? AS bucket, ? AS path, ? AS client_id) AS source
             ON target.bucket = source.bucket AND target.path = source.path
+               AND target.client_id = source.client_id
             WHEN MATCHED THEN
               UPDATE SET content = ?, content_type = ?, size_bytes = ?, updated_at = SYSUTCDATETIME()
             WHEN NOT MATCHED THEN
-              INSERT (bucket, path, content, content_type, size_bytes)
-              VALUES (?, ?, ?, ?, ?);
+              INSERT (bucket, path, client_id, content, content_type, size_bytes)
+              VALUES (?, ?, ?, ?, ?, ?);
             """,
-            (bucket, path, data, content_type, size, bucket, path, data, content_type, size),
+            (bucket, path, client, data, content_type, size, bucket, path, client, data, content_type, size),
         )
     except Exception as err:
         log.warning("SQL file write failed for %s/%s: %s", bucket, path, err)
@@ -103,18 +106,25 @@ def _sql_delete(bucket: str, path: Optional[str] = None, prefix: Optional[str] =
     try:
         from core.db import get_store
 
+        client = tenancy.current_client()
         if path is not None:
-            return int(get_store().execute("DELETE FROM dbo.storage_objects WHERE bucket = ? AND path = ?", (bucket, path)) or 0)
+            return int(get_store().execute(
+                "DELETE FROM dbo.storage_objects WHERE client_id = ? AND bucket = ? AND path = ?",
+                (client, bucket, path),
+            ) or 0)
         if prefix is not None:
             return int(get_store().execute(
-                "DELETE FROM dbo.storage_objects WHERE bucket = ? AND path LIKE ?", (bucket, prefix.replace("%", "[%]").replace("_", "[_]") + "%")
+                "DELETE FROM dbo.storage_objects WHERE client_id = ? AND bucket = ? AND path LIKE ?",
+                (client, bucket, prefix.replace("%", "[%]").replace("_", "[_]") + "%"),
             ) or 0)
         if older_than_days is not None:
             return int(get_store().execute(
-                "DELETE FROM dbo.storage_objects WHERE bucket = ? AND updated_at < DATEADD(day, ?, SYSUTCDATETIME())",
-                (bucket, -int(older_than_days)),
+                "DELETE FROM dbo.storage_objects WHERE client_id = ? AND bucket = ? AND updated_at < DATEADD(day, ?, SYSUTCDATETIME())",
+                (client, bucket, -int(older_than_days)),
             ) or 0)
-        return int(get_store().execute("DELETE FROM dbo.storage_objects WHERE bucket = ?", (bucket,)) or 0)
+        return int(get_store().execute(
+            "DELETE FROM dbo.storage_objects WHERE client_id = ? AND bucket = ?", (client, bucket)
+        ) or 0)
     except Exception as err:
         log.warning("SQL file delete failed for %s: %s", bucket, err)
         return 0
@@ -126,7 +136,11 @@ def _hydrate(bucket: str, name: str, target: Path) -> None:
     try:
         from core.db import get_store
 
-        rows = get_store().query("SELECT content FROM dbo.storage_objects WHERE bucket = ? AND path = ?", (bucket, name))
+        clause, params = tenancy.sql_filter()
+        rows = get_store().query(
+            f"SELECT content FROM dbo.storage_objects WHERE bucket = ? AND path = ?{clause}",
+            (bucket, name, *params),
+        )
     except Exception as err:
         log.warning("SQL file read failed for %s/%s: %s", bucket, name, err)
         return
@@ -143,7 +157,10 @@ def _sync_names(bucket: str, folder: Path) -> None:
     try:
         from core.db import get_store
 
-        rows = get_store().query("SELECT path FROM dbo.storage_objects WHERE bucket = ?", (bucket,))
+        clause, params = tenancy.sql_filter()
+        rows = get_store().query(
+            f"SELECT path FROM dbo.storage_objects WHERE bucket = ?{clause}", (bucket, *params)
+        )
     except Exception as err:
         log.warning("SQL file list failed for %s: %s", bucket, err)
         return
@@ -158,10 +175,11 @@ def _sync_names(bucket: str, folder: Path) -> None:
             target.touch()
 
 
-def bucket_dir(bucket: str) -> Path:
-    path = UPLOAD_DIR.joinpath(*bucket.split("/"))
-    path.mkdir(parents=True, exist_ok=True)
-    _sync_names(bucket, path)
+def bucket_dir(bucket: str, create: bool = True) -> Path:
+    path = tenancy.client_root(UPLOAD_DIR).joinpath(*bucket.split("/"))
+    if create:
+        path.mkdir(parents=True, exist_ok=True)
+        _sync_names(bucket, path)
     return path
 
 
@@ -199,7 +217,7 @@ def save_stream(bucket: str, name: str, source, max_bytes: int, signature: bytes
 
 
 def resolve(bucket: str, name: str) -> Optional[Path]:
-    folder = bucket_dir(bucket)
+    folder = bucket_dir(bucket, create=False)
     stored = safe_name(name)
     target = (folder / stored).resolve()
     if folder.resolve() not in target.parents:
@@ -254,9 +272,10 @@ def prune_older_than(bucket: str, days: int) -> int:
     try:
         from core.db import get_store
 
+        clause, params = tenancy.sql_filter()
         rows = get_store().query(
-            "SELECT path FROM dbo.storage_objects WHERE bucket = ? AND updated_at < DATEADD(day, ?, SYSUTCDATETIME())",
-            (bucket, -int(days)),
+            f"SELECT path FROM dbo.storage_objects WHERE bucket = ? AND updated_at < DATEADD(day, ?, SYSUTCDATETIME()){clause}",
+            (bucket, -int(days), *params),
         )
     except Exception as err:
         log.warning("SQL file prune list failed for %s: %s", bucket, err)
@@ -271,12 +290,14 @@ def usage_summary() -> list[dict]:
         try:
             from core.db import get_store
 
+            clause, params = tenancy.sql_filter(prefix="WHERE")
             rows = get_store().query(
-                """
+                f"""
                 SELECT bucket, COUNT(*) AS files, SUM(CAST(size_bytes AS bigint)) AS bytes,
                        MAX(size_bytes) AS largestBytes, MIN(created_at) AS oldest, MAX(updated_at) AS newest
-                FROM dbo.storage_objects GROUP BY bucket
-                """
+                FROM dbo.storage_objects{clause} GROUP BY bucket
+                """,
+                params,
             )
             out = []
             for row in rows:
@@ -297,9 +318,9 @@ def usage_summary() -> list[dict]:
             return sorted(out, key=lambda item: item["bytes"], reverse=True)
         except Exception as err:
             log.warning("SQL storage summary failed: %s", err)
-    root = UPLOAD_DIR
+    root = tenancy.client_root(UPLOAD_DIR)
     out = []
-    for bucket in sorted(p for p in root.iterdir() if p.is_dir()) if root.is_dir() else []:
+    for bucket in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("_")) if root.is_dir() else []:
         files = [f for f in bucket.iterdir() if f.is_file() and not f.name.endswith(".part") and f.stat().st_size > 0]
         if not files:
             continue

@@ -196,7 +196,9 @@ def proctor_violation(test_id: str, body: dict = Body(default_factory=dict), emp
             str(body["category"]) if body.get("category") else None, str(body["severity"]) if body.get("severity") else None)
         get_store().update("tests", {"proctoring": updated}, {"id": test["id"]})
         test_backup.snapshot(test["id"], "proctor")
-        auto = updated["autoSubmitted"] and not existing["autoSubmitted"] and updated["warningCount"] >= et.MAX_VIOLATIONS
+        # Keep autoSubmit true on every later violation too, so a client that
+        # missed the crossing response can still recover and submit the test.
+        auto = updated["autoSubmitted"] and updated["warningCount"] >= et.MAX_VIOLATIONS
         return {"success": True, "proctoring": updated, "autoSubmit": auto}
     except Exception as err:
         return public_error(err, "Internal error")

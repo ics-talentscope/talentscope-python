@@ -1,29 +1,130 @@
 import json
+import logging
 import math
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
+from core import tenancy
+from core.db import get_store
 from services import accounts
 from services.products import format_product_display_name
 
 DATA = Path(__file__).resolve().parents[1] / "data"
 BLOCKED_SUBJECTS = {"question banks", "auto-imported products"}
+log = logging.getLogger("talentscope")
+CONTENT_TYPES = {"catalog", "subject", "module", "topic"}
 
 
 def js_round(value: float) -> int:
     return int(math.floor(value + 0.5))
 
 
-@lru_cache(maxsize=1)
+def _content_rows(client: str) -> list[dict]:
+    """Tenant-scoped learning content rows that override the static JSON."""
+    try:
+        with tenancy.client_context(client):
+            return get_store().select(
+                "bootcamp_content",
+                {"content_type": sorted(CONTENT_TYPES), "is_active": True},
+                ["content_type", "content_key", "title", "payload"],
+                "created_at asc",
+            )
+    except Exception as err:
+        # Static JSON remains the fallback when the content table is not
+        # deployed yet (older installations) or the store is unavailable.
+        log.warning("Could not load tenant learning content: %s", err)
+        return []
+
+
+def _merge(existing: dict, override: dict) -> dict:
+    out = {**existing, **override}
+    for key, value in override.items():
+        if isinstance(value, list):
+            out[key] = list(value)
+    return out
+
+
+def _upsert_by_id(items: list, value: dict) -> None:
+    key = str(value.get("id") or "")
+    if not key:
+        return
+    for index, item in enumerate(items):
+        if str(item.get("id") or "").casefold() == key.casefold():
+            items[index] = _merge(item, value)
+            return
+    items.append(dict(value))
+
+
+def _apply_content_overrides(data: dict, client: str) -> dict:
+    catalog = data.setdefault("catalog", [])
+    subjects = data.setdefault("subjects", [])
+    for row in _content_rows(client):
+        if not isinstance(row.get("payload"), dict):
+            continue
+        kind = str(row.get("content_type") or "").strip().casefold()
+        payload = dict(row["payload"])
+        if kind == "catalog":
+            if isinstance(payload.get("catalog"), list):
+                data["catalog"] = payload["catalog"]
+            else:
+                _upsert_by_id(catalog, payload)
+        elif kind == "subject":
+            _upsert_by_id(subjects, payload)
+            # Subject metadata is shared by the topic list and the catalog.
+            # Merge into both; modules from the static catalog are retained
+            # unless the override explicitly supplies replacements.
+            _upsert_by_id(catalog, payload)
+        elif kind == "module":
+            subject_id = str(payload.get("subject_id") or payload.get("subjectId") or "")
+            module = {k: v for k, v in payload.items() if k not in ("subject_id", "subjectId")}
+            for collection in (subjects, catalog):
+                for subject in collection:
+                    if subject_id and str(subject.get("id") or "").casefold() != subject_id.casefold():
+                        continue
+                    _upsert_by_id(subject.setdefault("modules", []), module)
+        elif kind == "topic":
+            subject_id = str(payload.get("subject_id") or payload.get("subjectId") or "")
+            module_id = str(payload.get("module_id") or payload.get("moduleId") or "")
+            topic = {k: v for k, v in payload.items()
+                     if k not in ("subject_id", "subjectId", "module_id", "moduleId")}
+            for collection in (subjects, catalog):
+                for subject in collection:
+                    if subject_id and str(subject.get("id") or "").casefold() != subject_id.casefold():
+                        continue
+                    for module in subject.setdefault("modules", []):
+                        if module_id and str(module.get("id") or "").casefold() != module_id.casefold():
+                            continue
+                        _upsert_by_id(module.setdefault("topics", []), topic)
+    return data
+
+
+@lru_cache(maxsize=None)
+def _static_cached(client: str) -> dict:
+    return _apply_content_overrides(
+        json.loads((DATA / "learning_static.json").read_text(encoding="utf-8")), client
+    )
+
+
 def _static() -> dict:
-    return json.loads((DATA / "learning_static.json").read_text(encoding="utf-8"))
+    return _static_cached(tenancy.current_client())
 
 
-@lru_cache(maxsize=1)
+@lru_cache(maxsize=None)
+def _curriculum_cached(client: str) -> list[dict]:
+    data = {"catalog": json.loads((DATA / "learning_curriculum.json").read_text(encoding="utf-8"))}
+    return _apply_content_overrides(data, client)["catalog"]
+
+
 def curriculum() -> list[dict]:
-    return json.loads((DATA / "learning_curriculum.json").read_text(encoding="utf-8"))
+    return _curriculum_cached(tenancy.current_client())
+
+
+def invalidate_content_cache() -> None:
+    """Call after content CRUD so every tenant sees fresh overrides."""
+    _static_cached.cache_clear()
+    _curriculum_cached.cache_clear()
 
 
 def _blocked(subject: dict) -> bool:

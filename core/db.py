@@ -11,7 +11,7 @@ from typing import Any, Iterable, Optional, Union
 
 from core.config import db_target, mssql_settings, supabase_settings
 from core.logger import logger
-from core import request_context
+from core import request_context, tenancy
 
 JSON_COLUMNS = {
     "employees": {"badges"},
@@ -23,6 +23,8 @@ JSON_COLUMNS = {
     "candidate_interview_data": {"evaluation"},
     "question_sets": {"items"},
     "system_logs": {"request_payload", "response_payload"},
+    "bootcamp_assessments": {"config"},
+    "bootcamp_content": {"payload"},
 }
 
 POSTGRES_JSON_COLUMNS = {
@@ -37,6 +39,8 @@ POSTGRES_JSON_COLUMNS = {
     "evaluations": {"bloom_scores", "bloom_submissions", "bloom_graded"},
     "question_sets": {"items"},
     "system_logs": {"request_payload", "response_payload"},
+    "bootcamp_assessments": {"config"},
+    "bootcamp_content": {"payload"},
 }
 
 IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -45,6 +49,20 @@ ISO_VALUE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\
 MAX_IN = 1000
 OPS = {"eq": "=", "neq": "<>", "gt": ">", "gte": ">=", "lt": "<", "lte": "<=", "like": "LIKE"}
 TABLES_WITHOUT_ID = {"portal_settings", "question_sets"}
+
+# Every application table is client-owned except internal migration/sync
+# bookkeeping. New tables must be added here (fail-closed: an unlisted table
+# is not scoped at all, so keep this list in sync with the migrations).
+TENANT_TABLES = {
+    "resumes", "job_descriptions", "portal_settings", "employees", "tests", "audit_logs",
+    "simulated_emails", "candidate_interview_data", "interview_questions", "interview_attempts",
+    "candidate_sessions", "reset_logs", "learning_subjects", "learning_modules", "learning_topics",
+    "learning_resources", "test_questions", "test_attempts", "evaluations", "behavior_evaluations",
+    "business_impacts", "system_logs", "storage_objects", "question_sets", "interview_question_bank",
+    "employee_portal_question_bank", "employee_auth_otps",
+    "bootcamp_assessments", "bootcamp_cohorts", "bootcamp_cohort_members",
+    "bootcamp_assignments", "bootcamp_content",
+}
 
 Where = Union[None, dict, list]
 
@@ -69,6 +87,25 @@ def normalize_where(where: Where) -> list[tuple]:
                 out.append((col, "eq", val))
         return out
     return [tuple(item) if len(item) == 3 else (item[0], item[1], None) for item in where]
+
+
+def scoped_where(table: str, where: Where) -> list[tuple]:
+    """Normalize a filter and append the active client constraint."""
+    clauses = normalize_where(where)
+    client = tenancy.client_filter()
+    if table not in TENANT_TABLES or not client:
+        return clauses
+    if any(col == "client_id" for col, _, _ in clauses):
+        return clauses
+    return clauses + [("client_id", "eq", client)]
+
+
+def scoped_row(table: str, row: dict) -> dict:
+    """Stamp a row with the active client unless the caller set it explicitly."""
+    data = dict(row)
+    if table in TENANT_TABLES and not data.get("client_id"):
+        data["client_id"] = tenancy.current_client()
+    return data
 
 
 def normalize_order(order: Union[None, str, list]) -> list[tuple[str, bool]]:
@@ -418,7 +455,7 @@ class MssqlStore(Store):
         yield where
 
     def select(self, table, where=None, columns=None, order=None, limit=None, offset=None):
-        w = normalize_where(where)
+        w = scoped_where(table, where)
         chunks = list(self._split_big_in(w))
         if len(chunks) > 1:
             rows = []
@@ -447,13 +484,13 @@ class MssqlStore(Store):
         return [decode_row(table, r) for r in self._run(sql, tuple(params), True)]
 
     def count(self, table, where=None):
-        where_sql, params = self._where(table, normalize_where(where))
+        where_sql, params = self._where(table, scoped_where(table, where))
         rows = self._run(f"SELECT COUNT(*) AS n FROM [dbo].{ident(table)}{where_sql}", tuple(params), True)
         return int(rows[0]["n"])
 
     def _insert_one(self, table: str, row: dict) -> dict:
         json_cols = JSON_COLUMNS.get(table, set())
-        data = dict(row)
+        data = scoped_row(table, row)
         if table not in TABLES_WITHOUT_ID and not data.get("id"):
             data["id"] = str(uuid.uuid4())
         cols = list(data.keys())
@@ -476,7 +513,7 @@ class MssqlStore(Store):
         set_sql = ", ".join(f"{ident(c)} = ?" for c in cols)
         set_params = [encode_value(c, values[c], json_cols) for c in cols]
         total = 0
-        for chunk in self._split_big_in(normalize_where(where)):
+        for chunk in self._split_big_in(scoped_where(table, where)):
             where_sql, params = self._where(table, chunk)
             result = self._run(f"UPDATE [dbo].{ident(table)} SET {set_sql}{where_sql}", tuple(set_params + params), False)
             total += max(int(result), 0)
@@ -484,7 +521,7 @@ class MssqlStore(Store):
 
     def delete(self, table, where):
         total = 0
-        for chunk in self._split_big_in(normalize_where(where)):
+        for chunk in self._split_big_in(scoped_where(table, where)):
             where_sql, params = self._where(table, chunk)
             result = self._run(f"DELETE FROM [dbo].{ident(table)}{where_sql}", tuple(params), False)
             total += max(int(result), 0)
@@ -677,7 +714,7 @@ class SupabaseStore(Store):
         return value
 
     def select(self, table, where=None, columns=None, order=None, limit=None, offset=None):
-        w = normalize_where(where)
+        w = scoped_where(table, where)
         chunks = list(self._split_big_in(w))
         if len(chunks) > 1:
             rows = []
@@ -704,7 +741,7 @@ class SupabaseStore(Store):
         return [decode_row(table, row) for row in rows]
 
     def count(self, table, where=None):
-        params = [("select", "*")] + self._where(table, normalize_where(where))
+        params = [("select", "*")] + self._where(table, scoped_where(table, where))
         response, _ = self._request("HEAD", table, params, prefer="count=exact")
         content_range = response.headers.get("content-range", "")
         total = content_range.rsplit("/", 1)[-1]
@@ -713,7 +750,7 @@ class SupabaseStore(Store):
         return int(total)
 
     def _insert_one(self, table: str, row: dict) -> dict:
-        data = dict(row)
+        data = scoped_row(table, row)
         if table not in TABLES_WITHOUT_ID and not data.get("id"):
             data["id"] = str(uuid.uuid4())
         payload = {col: self._value(table, col, value) for col, value in data.items()}
@@ -729,14 +766,14 @@ class SupabaseStore(Store):
             return 0
         payload = {col: self._value(table, col, value) for col, value in values.items()}
         total = 0
-        for chunk in self._split_big_in(normalize_where(where)):
+        for chunk in self._split_big_in(scoped_where(table, where)):
             _, rows = self._request("PATCH", table, self._where(table, chunk), payload, "return=representation")
             total += len(rows)
         return total
 
     def delete(self, table, where):
         total = 0
-        for chunk in self._split_big_in(normalize_where(where)):
+        for chunk in self._split_big_in(scoped_where(table, where)):
             _, rows = self._request("DELETE", table, self._where(table, chunk), prefer="return=representation")
             total += len(rows)
         return total
@@ -800,14 +837,15 @@ class MemoryStore(Store):
 
     def seed(self, table: str, rows: list[dict]) -> None:
         with self.lock:
-            self.tables.setdefault(table, []).extend(json.loads(json.dumps(rows, default=str)))
+            seeded = [scoped_row(table, row) for row in rows]
+            self.tables.setdefault(table, []).extend(json.loads(json.dumps(seeded, default=str)))
 
     def _rows(self, table: str) -> list[dict]:
         return self.tables.setdefault(table, [])
 
     def select(self, table, where=None, columns=None, order=None, limit=None, offset=None):
         with self.lock:
-            w = normalize_where(where)
+            w = scoped_where(table, where)
             rows = [dict(r) for r in self._rows(table) if _match(r, w)]
             for col, desc in reversed(normalize_order(order)):
                 rows.sort(key=lambda r: (r.get(col) is None, r.get(col) if r.get(col) is not None else 0), reverse=desc)
@@ -820,7 +858,7 @@ class MemoryStore(Store):
 
     def count(self, table, where=None):
         with self.lock:
-            w = normalize_where(where)
+            w = scoped_where(table, where)
             return sum(1 for r in self._rows(table) if _match(r, w))
 
     def insert(self, table, rows):
@@ -828,7 +866,7 @@ class MemoryStore(Store):
             items = [rows] if isinstance(rows, dict) else list(rows)
             out = []
             for item in items:
-                data = dict(item)
+                data = scoped_row(table, item)
                 if table not in TABLES_WITHOUT_ID and not data.get("id"):
                     data["id"] = str(uuid.uuid4())
                 if "created_at" not in data and table not in TABLES_WITHOUT_ID:
@@ -839,7 +877,7 @@ class MemoryStore(Store):
 
     def update(self, table, values, where):
         with self.lock:
-            w = normalize_where(where)
+            w = scoped_where(table, where)
             n = 0
             for row in self._rows(table):
                 if _match(row, w):
@@ -849,7 +887,7 @@ class MemoryStore(Store):
 
     def delete(self, table, where):
         with self.lock:
-            w = normalize_where(where)
+            w = scoped_where(table, where)
             keep = [r for r in self._rows(table) if not _match(r, w)]
             removed = len(self._rows(table)) - len(keep)
             self.tables[table] = keep

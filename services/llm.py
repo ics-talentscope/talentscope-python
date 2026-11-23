@@ -12,6 +12,7 @@ from typing import Any, Optional
 
 import httpx
 
+from core import tenancy
 from core.config import env
 from core.logger import logger
 from core.request_context import log_context
@@ -220,7 +221,7 @@ def fit_prompt(system: str, prompt: str, max_tokens: int) -> tuple[str, int]:
 
 
 def _cache_key(system: str, prompt: str, temperature: float, max_tokens: int) -> str:
-    return hashlib.sha256(json.dumps([system, prompt, temperature, max_tokens]).encode()).hexdigest()
+    return hashlib.sha256(json.dumps([tenancy.current_client(), system, prompt, temperature, max_tokens]).encode()).hexdigest()
 
 
 def _cache_get(key: str) -> Optional[str]:

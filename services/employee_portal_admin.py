@@ -4,10 +4,12 @@ import random
 import re
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 from zipfile import BadZipFile
 
+from core import tenancy
 from core.db import get_store
-from services import accounts, employee_tests, settings, storage, test_video
+from services import accounts, employee_tests, question_bank, settings, storage, test_video
 
 PRODUCTS_KEY = "employee_portal_products"
 MAX_QUESTION_BANK_SIZE = 5000
@@ -43,7 +45,7 @@ def _bank_questions(key: str, version: str) -> list[dict]:
     questions = get_store().select(
         "employee_portal_question_bank",
         {"product_key": key, "bank_version": version},
-        ["question_text", "options", "correct_option_index", "explanation", "difficulty"],
+        ["question_text", "options", "correct_option_index", "explanation", "difficulty", "topic"],
     )
     if not questions:
         raise ValueError("The configured question bank is empty or unavailable.")
@@ -71,6 +73,8 @@ def _parse_wide_rows(rows: list[tuple], header: list[str]) -> list[dict]:
         # Sample TPM books place the question in column B and options in C:F.
         q_idx, option_indices, answer_idx = 1, [2, 3, 4, 5], 6
     explanation_idx = find("explanation")
+    topic_idx = find("topic", "category", "subject")
+    difficulty_idx = find("difficulty", "level")
     letter_index = {letter.upper(): index for index, letter in enumerate("abcd")}
     output = []
     for row in rows:
@@ -87,9 +91,11 @@ def _parse_wide_rows(rows: list[tuple], header: list[str]) -> list[dict]:
         if correct is None or any(not option for option in options):
             continue
         explanation = _cell(row[explanation_idx]) if explanation_idx is not None and explanation_idx < len(row) else ""
+        topic = _cell(row[topic_idx]) if topic_idx is not None and topic_idx < len(row) else ""
+        difficulty = _cell(row[difficulty_idx]) if difficulty_idx is not None and difficulty_idx < len(row) else ""
         output.append({
             "question_text": question, "options": options, "correct_option_index": correct,
-            "explanation": explanation, "difficulty": "medium",
+            "explanation": explanation, "difficulty": difficulty or "medium", "topic": topic,
         })
     return output
 
@@ -109,17 +115,28 @@ def _parse_stacked_rows(rows: list[tuple], header: list[str]) -> list[dict]:
     option_idx = next((i for i, value in enumerate(header) if value.startswith("option")), None)
     if option_idx is None:
         option_idx = next((i for i, value in enumerate(header) if value == "a" and i not in (q_idx, answer_idx)), 4)
+    topic_idx = next((i for i, value in enumerate(header)
+                      if "topic" in value or value in ("category", "subject")), None)
+    difficulty_idx = next((i for i, value in enumerate(header)
+                           if "difficulty" in value or value == "level"), None)
     groups: dict[str, dict] = {}
     current_question = ""
+    current_topic = ""
+    current_difficulty = "medium"
     for row in rows:
         question = _cell(row[q_idx]) if q_idx < len(row) else ""
         option = _cell(row[option_idx]) if option_idx < len(row) else ""
         answer = _cell(row[answer_idx]).casefold() if answer_idx is not None and answer_idx < len(row) else ""
         if question:
             current_question = question
+            current_topic = _cell(row[topic_idx]) if topic_idx is not None and topic_idx < len(row) else ""
+            current_difficulty = (_cell(row[difficulty_idx])
+                                  if difficulty_idx is not None and difficulty_idx < len(row) else "") or "medium"
         if not current_question or not option:
             continue
-        group = groups.setdefault(current_question, {"options": [], "correct": None})
+        group = groups.setdefault(current_question, {
+            "options": [], "correct": None, "topic": current_topic, "difficulty": current_difficulty,
+        })
         if option not in group["options"]:
             group["options"].append(option)
         if answer.startswith("correct") or answer in ("✓", "✔", "yes", "true"):
@@ -135,7 +152,8 @@ def _parse_stacked_rows(rows: list[tuple], header: list[str]) -> list[dict]:
             "options": options,
             "correct_option_index": group["correct"],
             "explanation": "Imported from the product question bank.",
-            "difficulty": "medium",
+            "difficulty": group["difficulty"] or "medium",
+            "topic": group["topic"],
         })
     return questions
 
@@ -200,7 +218,7 @@ def save_question_bank(product: str, question_count: int, questions: list[dict])
             "question_text": question["question_text"], "options": question["options"],
             "correct_option_index": question["correct_option_index"],
             "explanation": question.get("explanation") or "", "difficulty": question.get("difficulty") or "medium",
-            "created_at": now,
+            "topic": question.get("topic") or "", "created_at": now,
         }
         for question in questions
     ])
@@ -210,28 +228,143 @@ def save_question_bank(product: str, question_count: int, questions: list[dict])
     return {"product": product, "questionCount": question_count, "bankQuestionCount": len(questions), "bankVersion": version}
 
 
-def assign_product_test(employee: dict, config: dict, rng=None) -> dict:
+def _assessment_source(assessment: dict) -> str:
+    raw = assessment.get("question_source") if "question_source" in assessment else assessment.get("questionSource")
+    value = str(raw or "bank").strip().casefold().replace("_", "-")
+    if value in ("ai", "ai-questionnaire", "ai-questionaire", "ai questionnaire", "questionnaire", "generated"):
+        return "ai"
+    return "bank"
+
+
+def _assessment_int(assessment: dict, names: tuple, default: int) -> int:
+    for name in names:
+        if assessment.get(name) is not None:
+            try:
+                return int(assessment[name])
+            except (TypeError, ValueError):
+                return default
+    return default
+
+
+def _assessment_config(assessment: Optional[dict]) -> dict:
+    if not assessment:
+        return {}
+    config = assessment.get("config")
+    return config if isinstance(config, dict) else {}
+
+
+def _assessment_topics(assessment: Optional[dict]) -> list[str]:
+    config = _assessment_config(assessment)
+    raw = config.get("topics") or config.get("topicList") or config.get("topic_list") or []
+    if isinstance(raw, str):
+        raw = re.split(r"[,\n;]+", raw)
+    if not isinstance(raw, (list, tuple, set)):
+        return []
+    return [str(item).strip() for item in raw if str(item or "").strip()]
+
+
+def _assessment_difficulty_mix(assessment: Optional[dict]) -> dict[str, int]:
+    config = _assessment_config(assessment)
+    raw = config.get("difficultyMix") or config.get("difficulty_mix") or {}
+    if not isinstance(raw, dict):
+        return {}
+    mix = {}
+    for key in ("easy", "medium", "hard"):
+        try:
+            value = max(0, int(raw.get(key) or 0))
+        except (TypeError, ValueError):
+            value = 0
+        if value:
+            mix[key] = value
+    return mix
+
+
+def _sample_bank_questions(questions: list[dict], count: int, assessment: Optional[dict],
+                           rng, product: str) -> list[dict]:
+    pool = questions
+    topics = _assessment_topics(assessment)
+    if topics:
+        wanted = {topic.casefold() for topic in topics}
+        matched = [question for question in questions
+                   if str(question.get("topic") or "").strip().casefold() in wanted]
+        if matched:
+            pool = matched
+    if count > len(pool):
+        raise ValueError(f"The question bank for {product} has fewer than {count} matching questions.")
+    mix = _assessment_difficulty_mix(assessment)
+    if not mix:
+        return rng.sample(pool, count)
+    chosen: list[dict] = []
+    for difficulty, wanted_count in mix.items():
+        candidates = [question for question in pool
+                      if str(question.get("difficulty") or "medium").strip().casefold() == difficulty]
+        chosen.extend(rng.sample(candidates, min(wanted_count, len(candidates))))
+    if len(chosen) < count:
+        chosen_ids = {id(question) for question in chosen}
+        remaining = [question for question in pool if id(question) not in chosen_ids]
+        chosen.extend(rng.sample(remaining, count - len(chosen)))
+    return chosen[:count]
+
+
+def assign_product_test(employee: dict, config: dict, rng=None, assessment: Optional[dict] = None) -> dict:
+    """Create the employee's delivery test in ``tests`` / ``test_questions``.
+
+    Without ``assessment`` the product-question-bank behavior is byte-for-byte
+    the legacy behavior. Slalom bootcamp callers pass their assessment row to
+    override topic, title, question count, time limit and question source.
+    """
     key = product_key(employee.get("product"))
-    questions = _bank_questions(key, config["bankVersion"])
-    count = int(config["questionCount"])
-    if count > len(questions):
-        raise ValueError(f"The question bank for {config['product']} has fewer than {count} questions.")
-    chosen = (rng or random.SystemRandom()).sample(questions, count)
+    if assessment:
+        source = _assessment_source(assessment)
+        count = _assessment_int(assessment, ("question_count", "questionCount"), int(config["questionCount"]))
+        topic_id = str(assessment.get("topic_id") or assessment.get("topicId") or accounts.PRODUCT_ASSESSMENT_TOPIC_ID)
+        topic_title = str(assessment.get("topic_title") or assessment.get("topicTitle")
+                           or assessment.get("title") or config["product"])
+        subject_id = str(assessment.get("subject_id") or assessment.get("subjectId") or "resource-subject")
+        subject_title = str(assessment.get("subject_title") or assessment.get("subjectTitle") or "Bootcamp Assessment")
+        difficulty = str(assessment.get("difficulty") or "medium")
+        time_limit = _assessment_int(assessment, ("time_limit_seconds", "timeLimitSeconds"), max(1800, count * 72))
+    else:
+        source = "bank"
+        count = int(config["questionCount"])
+        topic_id = accounts.PRODUCT_ASSESSMENT_TOPIC_ID
+        topic_title = config["product"]
+        subject_id = "resource-subject"
+        subject_title = "Product Assessment"
+        difficulty = "medium"
+        time_limit = max(1800, count * 72)
+
+    if count < 1:
+        raise ValueError("An assessment must have at least one question.")
+    if source == "bank":
+        questions = _bank_questions(key, config["bankVersion"])
+        chosen = _sample_bank_questions(
+            questions, count, assessment, rng or random.SystemRandom(), config["product"]
+        )
+    else:
+        generated = question_bank.generate_ai_questions(subject_title, topic_title, difficulty, count)
+        if len(generated) < count:
+            raise RuntimeError("The assessment could not generate enough questions.")
+        chosen = [{
+            "question_text": item["question"], "options": item["options"],
+            "correct_option_index": item["correctIndex"], "explanation": item.get("explanation") or "",
+            "difficulty": item.get("difficulty") or difficulty,
+        } for item in generated[:count]]
+
     store = get_store()
     employee_uuid = accounts.employee_uuid(employee["employee_id"])
     if not employee_uuid:
         raise RuntimeError(f"Could not resolve employee account {employee['employee_id']}.")
-    test = store.first("tests", {"employee_id": employee_uuid, "topic_id": accounts.PRODUCT_ASSESSMENT_TOPIC_ID})
+    test = store.first("tests", {"employee_id": employee_uuid, "topic_id": topic_id})
     now = datetime.now(timezone.utc).isoformat()
-    time_limit = max(1800, count * 72)
     if test:
         employee_tests.archive_as_history(test["id"])
         store.delete("test_attempts", {"test_id": test["id"]})
         store.delete("test_questions", {"test_id": test["id"]})
         store.update("tests", {
-            "employee_code": employee["employee_id"], "topic_title": config["product"],
-            "subject_id": "resource-subject", "subject_title": "Product Assessment",
-            "difficulty": "medium", "total_questions": count, "time_limit_seconds": time_limit,
+            "employee_code": employee["employee_id"], "topic_title": topic_title,
+            "subject_id": subject_id, "subject_title": subject_title,
+            "difficulty": difficulty, "total_questions": count, "time_limit_seconds": time_limit,
             "status": "pending", "current_question_index": 0, "started_at": None, "completed_at": None,
             "in_progress": None, "session_recording_url": None, "proctoring": None,
             "score_correct": None, "score_total": None, "score_percent": None, "ai_analysis": None,
@@ -241,8 +374,8 @@ def assign_product_test(employee: dict, config: dict, rng=None) -> dict:
         test_id = str(uuid.uuid4())
         store.insert("tests", {
             "id": test_id, "employee_id": employee_uuid, "employee_code": employee["employee_id"],
-            "topic_id": accounts.PRODUCT_ASSESSMENT_TOPIC_ID, "subject_id": "resource-subject",
-            "topic_title": config["product"], "subject_title": "Product Assessment", "difficulty": "medium",
+            "topic_id": topic_id, "subject_id": subject_id,
+            "topic_title": topic_title, "subject_title": subject_title, "difficulty": difficulty,
             "total_questions": count, "time_limit_seconds": time_limit, "status": "pending",
             "current_question_index": 0, "created_at": now,
         })
@@ -251,12 +384,15 @@ def assign_product_test(employee: dict, config: dict, rng=None) -> dict:
             "id": str(uuid.uuid4()), "test_id": test_id, "question_index": index,
             "question_text": question["question_text"], "options": question["options"],
             "correct_option_index": question["correct_option_index"], "explanation": question.get("explanation") or "",
-            "difficulty": question.get("difficulty") or "medium",
-            "topic_id": accounts.PRODUCT_ASSESSMENT_TOPIC_ID, "topic_title": config["product"], "created_at": now,
+            "difficulty": question.get("difficulty") or difficulty,
+            "topic_id": topic_id, "topic_title": topic_title, "created_at": now,
         }
         for index, question in enumerate(chosen)
     ])
-    return {"testId": test_id, "questionCount": count}
+    result = {"testId": test_id, "questionCount": count}
+    if assessment:
+        result["topicId"] = topic_id
+    return result
 
 
 def delete_portal_employees(employee_ids: list[str]) -> int:
@@ -355,7 +491,24 @@ def _question_source(details: dict) -> str:
     raise ValueError("Question source must be AI Questionnaire or Product Question Bank.")
 
 
-def provision_employee(details: dict) -> dict:
+def provision_employee(details: dict, assessment: Optional[dict] = None) -> dict:
+    """Provision an employee and, when supplied, honor a Slalom assessment.
+
+    The optional assessment is resolved lazily so the legacy Infinite path has
+    no dependency on the Slalom service and keeps its existing behavior.
+    """
+    if assessment is None:
+        raw_assessment_id = next((
+            details.get(field) for field in ("assessmentId", "assessment_id", "bootcampAssessmentId")
+            if details.get(field)
+        ), None)
+        if raw_assessment_id and tenancy.current_client() == "slalom":
+            from services import slalom_bootcamp
+
+            assessment = slalom_bootcamp.get_assessment(str(raw_assessment_id), active_only=True)
+    if assessment is not None and tenancy.current_client() != "slalom":
+        assessment = None
+
     employee_id = str(details.get("employee_id") or "").strip()
     full_name = str(details.get("full_name") or "").strip()
     email = str(details.get("email") or "").strip().lower()
@@ -363,6 +516,10 @@ def provision_employee(details: dict) -> dict:
     designation = str(details.get("designation") or "").strip()
     department = str(details.get("department") or "").strip()
     question_source = _question_source(details)
+    assessment_source = None
+    if assessment is not None:
+        assessment_source = _assessment_source(assessment)
+        question_source = assessment_source
     if not employee_id or len(employee_id) > 40 or not re.fullmatch(r"[A-Za-z0-9._-]+", employee_id):
         raise ValueError("Employee ID is required and may contain only letters, numbers, periods, underscores, and hyphens.")
     if not full_name or len(full_name) > 120:
@@ -370,7 +527,24 @@ def provision_employee(details: dict) -> dict:
     if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", email) or len(email) > 254:
         raise ValueError("A valid employee email address is required.")
     config = None
-    if question_source == "bank":
+    if assessment is not None:
+        count = _assessment_int(assessment, ("question_count", "questionCount"), 10)
+        if count < 1:
+            raise ValueError("An assessment must have at least one question.")
+        if assessment_source == "bank":
+            product = " ".join(str(assessment.get("question_bank_product") or assessment.get("title") or "").split())
+            if not product:
+                raise ValueError("Product is required when using the product question bank.")
+            configs = _products()
+            config = configs.get(product_key(product))
+            if not config:
+                raise ValueError(f"No question bank is configured for product {product!r}.")
+            product = config["product"]
+            config = {**config, "questionCount": count}
+        else:
+            product = accounts.AI_QUESTIONNAIRE_PRODUCT
+            config = {"product": product, "questionCount": count, "bankVersion": None}
+    elif question_source == "bank":
         configs = _products()
         config = configs.get(product_key(product)) if product else None
         if not product:
@@ -381,6 +555,7 @@ def provision_employee(details: dict) -> dict:
     else:
         product = accounts.AI_QUESTIONNAIRE_PRODUCT
         config = None
+    topic_id = str(assessment.get("topic_id") or assessment.get("topicId") or accounts.PRODUCT_ASSESSMENT_TOPIC_ID) if assessment else accounts.PRODUCT_ASSESSMENT_TOPIC_ID
     existing = accounts.get_account(employee_id)
     if existing and existing.get("role") != "employee":
         raise ValueError("This Employee ID is already assigned to a non-employee account.")
@@ -390,20 +565,27 @@ def provision_employee(details: dict) -> dict:
         employee_uuid = accounts.employee_uuid(employee_id)
         if employee_uuid:
             existing_test = get_store().first(
-                "tests", {"employee_id": employee_uuid, "topic_id": accounts.PRODUCT_ASSESSMENT_TOPIC_ID},
+                "tests", {"employee_id": employee_uuid, "topic_id": topic_id},
                 ["id", "status", "topic_title", "total_questions"],
             )
-            if existing_test:
+            if existing_test and assessment_source != "ai":
                 bank_questions = _bank_questions(product_key(config["product"]), config["bankVersion"])
     product_changed = bool(existing and config is not None and product and existing.get("product") and product_key(existing.get("product")) != product_key(product))
-    assignment_matches = bool(
-        config is not None and existing_test and not product_changed
-        and product_key(existing_test.get("topic_title")) == product_key(config["product"])
-        and int(existing_test.get("total_questions") or 0) == int(config["questionCount"])
-        and get_store().count("test_questions", {"test_id": existing_test["id"]}) == int(config["questionCount"])
-        and bank_questions is not None
-        and _assignment_uses_bank(existing_test["id"], bank_questions)
-    )
+    if assessment is not None and assessment_source == "ai":
+        assignment_matches = bool(
+            existing_test and not product_changed
+            and int(existing_test.get("total_questions") or 0) == int(config["questionCount"])
+            and get_store().count("test_questions", {"test_id": existing_test["id"]}) == int(config["questionCount"])
+        )
+    else:
+        assignment_matches = bool(
+            config is not None and existing_test and not product_changed
+            and product_key(existing_test.get("topic_title")) == product_key(config["product"])
+            and int(existing_test.get("total_questions") or 0) == int(config["questionCount"])
+            and get_store().count("test_questions", {"test_id": existing_test["id"]}) == int(config["questionCount"])
+            and bank_questions is not None
+            and _assignment_uses_bank(existing_test["id"], bank_questions)
+        )
     if existing_test and config is not None and not assignment_matches and existing_test.get("status") == "in_progress":
         raise ValueError("This employee has an in-progress assessment. Finish it before changing the product assignment.")
     if existing:
@@ -446,20 +628,24 @@ def provision_employee(details: dict) -> dict:
             assignment = {"testId": existing_test["id"], "questionCount": int(existing_test["total_questions"]) }
         else:
             try:
-                assignment = assign_product_test(saved, config)
+                assignment = assign_product_test(saved, config, assessment=assessment)
             except Exception:
                 if not existing:
                     get_store().delete("employees", {"employee_id": employee_id})
                 raise
     else:
         assignment = {"testId": None, "questionCount": 0}
-    return {
+    result = {
         "employeeId": saved["employee_id"], "name": saved["full_name"], "email": saved["email"],
         "designation": saved["designation"], "product": saved["product"],
         "firstLoginPassword": employee_id if default_password_active else None,
         "testId": assignment["testId"], "questionCount": assignment["questionCount"],
         "created": existing is None, "questionSource": question_source,
     }
+    if assessment is not None:
+        result["assessmentId"] = assessment.get("id")
+        result["topicId"] = topic_id
+    return result
 
 
 def parse_employee_upload(content: bytes, filename: str, question_source: str | None = None) -> list[dict]:

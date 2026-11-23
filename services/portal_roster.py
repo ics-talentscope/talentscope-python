@@ -3,6 +3,7 @@ import logging
 import re
 from typing import Optional
 
+from core import tenancy
 from core.db import get_store
 from services import docs_storage
 from services.products import format_product_display_name, format_topic_title_for_display
@@ -137,7 +138,7 @@ def load_mapping_rows() -> list[dict]:
     name = _mapping_file()
     if not name:
         return []
-    key = (name, docs_storage.mtime("Portal Mapping", name))
+    key = (tenancy.current_client(), name, docs_storage.mtime("Portal Mapping", name))
     if _mapping_cache["key"] == key:
         return _mapping_cache["rows"]
     try:
@@ -156,40 +157,19 @@ def _questions_from_active_test(employee_id: str) -> list[str]:
     emp_id = normalize_employee_id(employee_id)
     if not emp_id:
         return []
-    tests = store.query(
-        """
-        SELECT TOP 1 t.id
-        FROM dbo.tests t
-        WHERE (t.employee_code = ? OR CONVERT(nvarchar(64), t.employee_id) = ?)
-          AND (t.topic_id = ? OR t.topic_title IS NOT NULL)
-        ORDER BY
-          CASE WHEN t.topic_id = ? THEN 0 ELSE 1 END,
-          t.created_at DESC
-        """,
-        (emp_id, emp_id, PRODUCT_TOPIC, PRODUCT_TOPIC),
-    )
-    if not tests:
-        # Fallback: latest test for this employee code regardless of topic
-        tests = store.query(
-            """
-            SELECT TOP 1 t.id
-            FROM dbo.tests t
-            WHERE t.employee_code = ?
-            ORDER BY t.created_at DESC
-            """,
-            (emp_id,),
-        )
-    if not tests:
+    columns = ["id", "topic_id", "topic_title", "created_at"]
+    by_code = store.select("tests", {"employee_code": emp_id}, columns)
+    by_owner = store.select("tests", {"employee_id": emp_id}, columns)
+    merged: dict = {str(row["id"]): row for row in [*by_code, *by_owner]}
+    # Prefer the product assessment, then any titled test, then newest first.
+    ranked = sorted(merged.values(), key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    ranked.sort(key=lambda row: 0 if row.get("topic_id") == PRODUCT_TOPIC else 1 if row.get("topic_title") else 2)
+    if not ranked:
+        # Fallback: latest test for this employee code regardless of topic.
+        ranked = sorted(by_code, key=lambda row: str(row.get("created_at") or ""), reverse=True)
+    if not ranked:
         return []
-    rows = store.query(
-        """
-        SELECT question_text
-        FROM dbo.test_questions
-        WHERE test_id = ?
-        ORDER BY question_index ASC
-        """,
-        (tests[0]["id"],),
-    )
+    rows = store.select("test_questions", {"test_id": ranked[0]["id"]}, ["question_text"], "question_index asc")
     return [str(r.get("question_text") or "").strip() for r in rows if str(r.get("question_text") or "").strip()]
 
 

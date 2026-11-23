@@ -110,7 +110,7 @@ def test_insert_sends_json_and_requests_returned_row():
 def test_question_set_insert_does_not_send_an_id():
     def handler(request):
         payload = json.loads(request.content)
-        assert payload == {"resume_id": "resume-1", "status": "queued"}
+        assert payload == {"resume_id": "resume-1", "status": "queued", "client_id": "infinite"}
         return httpx.Response(201, json=[payload])
 
     store = make_store(handler)
@@ -119,7 +119,7 @@ def test_question_set_insert_does_not_send_an_id():
     finally:
         store.client.close()
 
-    assert row == {"resume_id": "resume-1", "status": "queued"}
+    assert row == {"resume_id": "resume-1", "status": "queued", "client_id": "infinite"}
 
 
 def test_question_set_upsert_does_not_send_an_id():

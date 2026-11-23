@@ -6,6 +6,7 @@ from urllib.parse import quote
 from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response
 
+from core import tenancy
 from core.auth import bearer_token, require_employee
 from core.config import env
 from core.errors import json_error, public_error
@@ -61,11 +62,15 @@ def login(request: Request, body: dict = Body(default_factory=dict)):
         account_limit = is_rate_limited_any([f"auth:acct:{rate_key}"], 8, 60_000)
         if account_limit.limited:
             return rate_limited_response(account_limit, "Too many login attempts. Please try again later.")
-        employee = accounts.get_account(employee_id) if employee_id else None
-        if not employee and login_email:
-            employee = accounts.get_account_by_email(login_email)
-            if employee:
-                employee_id = employee["employee_id"]
+        matches = accounts.find_accounts_any_client(employee_id or "", login_email or "")
+        employee = None
+        if len(matches) == 1:
+            employee = matches[0]
+        elif len(matches) > 1 and login_email:
+            employee = next((a for a in matches if a.get("client_id") == tenancy.client_for_email(login_email)), None)
+        if employee:
+            employee_id = employee["employee_id"]
+            tenancy.set_client(employee.get("client_id"))
         if not employee:
             # Same message as bad password to avoid account enumeration.
             return json_error(401, "Employee ID or password is incorrect. Check both fields and try again.")
@@ -86,9 +91,9 @@ def login(request: Request, body: dict = Body(default_factory=dict)):
                 return json_error(401, "No password is configured for this account yet. Sign in with Microsoft or ask HR to set your initial password.")
             audit.add_log(actor, "EMPLOYEE_LOGIN_FAILURE", "Employee Portal", "Invalid password provided", ip)
             return json_error(401, "Employee ID or password is incorrect. Check both fields and try again.")
-        # Emp-ID temporary password always forces the keep/change modal.
-        force_password_prompt = first_login or (is_emp_id_pw and hash_valid)
-        token = sign_token(employee["employee_id"])
+        # First login uses the keep/change modal; established accounts sign in normally.
+        force_password_prompt = first_login
+        token = sign_token(employee["employee_id"], client=employee.get("client_id"))
         accounts.sync_account(employee)
         if force_password_prompt:
             audit.add_log(actor, "EMPLOYEE_LOGIN_FIRST_TIME_SUCCESS", "Employee Portal",
@@ -149,7 +154,7 @@ def set_password(request: Request, body: dict = Body(default_factory=dict)):
             return json_error(400, "Password setup has already been completed")
         if not accounts.save_password(employee["employee_id"], password):
             return json_error(500, "Failed to save password")
-        return {"status": "ok", "token": sign_token(employee["employee_id"]), "employee": _employee_payload(employee)}
+        return {"status": "ok", "token": sign_token(employee["employee_id"], client=employee.get("client_id")), "employee": _employee_payload(employee)}
     except Exception as err:
         return public_error(err, "Unable to set password")
 
@@ -298,7 +303,7 @@ def update_profile(request: Request, body: dict = Body(default_factory=dict)):
             f"Profile name updated to {updated['full_name']}.",
             ip,
         )
-        token = sign_token(updated["employee_id"])
+        token = sign_token(updated["employee_id"], client=updated.get("client_id"))
         return {
             "status": "ok",
             "message": "Profile updated.",
@@ -412,7 +417,7 @@ def saml_start(request: Request):
 
 def _admin_identity(emails: list[str]) -> Optional[str]:
     for email in emails:
-        if not email.endswith("@infinite.com"):
+        if not admin_accounts.is_admin_email(email):
             continue
         if (
             admin_accounts.is_super_admin(email)
@@ -430,8 +435,8 @@ def _finish_admin(cfg: dict, profile: dict, emails: list[str], ip: str):
     email = _admin_identity(emails)
     if not email:
         tried = ", ".join(emails) if emails else str(profile.get("nameID") or "unknown")
-        audit.add_log(emails[0] if emails else str(profile.get("nameID") or "unknown"), "ADMIN_SAML_SSO_FAILURE", "Admin Console",
-                      f"SAML identity has no admin access ({tried}).", ip)
+        audit.add_login_log(emails[0] if emails else str(profile.get("nameID") or "unknown"), "ADMIN_SAML_SSO_FAILURE", "Admin Console",
+                            f"SAML identity has no admin access ({tried}).", ip)
         return _sso_error(
             cfg["app_url"],
             f"Microsoft signed you in as {tried}, but that email is not in Admin Panel Access. "
@@ -439,22 +444,31 @@ def _finish_admin(cfg: dict, profile: dict, emails: list[str], ip: str):
             303,
             "admin",
         )
-    audit.add_log(email, "ADMIN_SAML_SSO_SUCCESS", "Admin Console", "SAML SSO login to the admin console.", ip)
+    audit.add_login_log(email, "ADMIN_SAML_SSO_SUCCESS", "Admin Console", "SAML SSO login to the admin console.", ip)
     response = RedirectResponse(f"{cfg['app_url']}/admin/sso-complete", status_code=303)
-    response.set_cookie(ADMIN_HANDOFF_COOKIE, sign_token("admin", 60 * 60 * 1000, email=email), max_age=120, httponly=True,
-                        samesite="lax", secure=_cookie_secure(), path="/")
+    response.set_cookie(ADMIN_HANDOFF_COOKIE,
+                        sign_token("admin", 60 * 60 * 1000, email=email,
+                                   client=admin_accounts.client_for_admin(email)),
+                        max_age=120, httponly=True, samesite="lax", secure=_cookie_secure(), path="/")
     return response
 
 
 def _finish_employee(cfg: dict, profile: dict, emails: list[str], ip: str):
     employee = None
     for email in emails:
-        employee = accounts.get_account_by_email(email)
-        if employee:
-            break
+        matches = accounts.find_accounts_any_client(email=email)
+        if matches:
+            employee = matches[0] if len(matches) == 1 else next(
+                (a for a in matches if a.get("client_id") == tenancy.client_for_email(email)), None
+            )
+            if employee:
+                break
     if not employee:
         local = saml.profile_local_part(profile, cfg)
-        employee = accounts.get_account(local) if local else None
+        matches = accounts.find_accounts_any_client(employee_id=local) if local else []
+        employee = matches[0] if len(matches) == 1 else None
+    if employee:
+        tenancy.set_client(employee.get("client_id"))
     if not employee:
         audit.add_log(emails[0] if emails else str(profile.get("nameID") or "unknown"), "EMPLOYEE_SAML_SSO_FAILURE",
                       "Employee Portal", "SAML identity is not linked to an Employee Portal roster email or ID.", ip)
@@ -463,7 +477,7 @@ def _finish_employee(cfg: dict, profile: dict, emails: list[str], ip: str):
     audit.add_log(employee["email"] or (emails[0] if emails else employee["employee_id"]), "EMPLOYEE_SAML_SSO_SUCCESS",
                   "Employee Portal", f"SAML SSO login as {employee['full_name']} ({employee['employee_id']}).", ip)
     response = RedirectResponse(f"{cfg['app_url']}/employee/sso-complete", status_code=303)
-    response.set_cookie(HANDOFF_COOKIE, sign_token(employee["employee_id"]), max_age=120, httponly=True, samesite="lax",
+    response.set_cookie(HANDOFF_COOKIE, sign_token(employee["employee_id"], client=employee.get("client_id")), max_age=120, httponly=True, samesite="lax",
                         secure=_cookie_secure(), path="/")
     return response
 

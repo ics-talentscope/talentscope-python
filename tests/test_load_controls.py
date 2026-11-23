@@ -99,13 +99,13 @@ def test_breaker_opens_after_repeated_failures_and_cache_skips_repeat_calls(monk
 
 
 def test_interview_duration_uses_default_then_candidate_override(client, store):
-    seed_candidate(store)
-    assert client.get(f"/api/interview/{RID}/timing").json()["durationSeconds"] == 15 * 60
+    auth = seed_candidate(store)
+    assert client.get(f"/api/interview/{RID}/timing", headers=auth).json()["durationSeconds"] == 15 * 60
     settings.update_interview_defaults({"durationMinutes": 30})
-    assert client.get(f"/api/interview/{RID}/timing").json()["durationSeconds"] == 30 * 60
+    assert client.get(f"/api/interview/{RID}/timing", headers=auth).json()["durationSeconds"] == 30 * 60
     store.update("resumes", {"report": {"interviewConfig": {"durationMinutes": 45}}}, {"id": RID})
     resumes._cache.clear()
-    assert client.get(f"/api/interview/{RID}/timing").json()["durationSeconds"] == 45 * 60
+    assert client.get(f"/api/interview/{RID}/timing", headers=auth).json()["durationSeconds"] == 45 * 60
 
 
 def test_duration_is_clamped():
@@ -115,17 +115,17 @@ def test_duration_is_clamped():
 
 
 def test_start_is_idempotent_and_expiry_blocks_submissions(client, store):
-    seed_candidate(store, interviewConfig={"durationMinutes": 5})
-    first = client.post(f"/api/interview/{RID}/start").json()["data"]
-    second = client.post(f"/api/interview/{RID}/start").json()["data"]
+    auth = seed_candidate(store, interviewConfig={"durationMinutes": 5})
+    first = client.post(f"/api/interview/{RID}/start", headers=auth).json()["data"]
+    second = client.post(f"/api/interview/{RID}/start", headers=auth).json()["data"]
     assert first["startedAt"] == second["startedAt"] and first["remainingSeconds"] <= 300
-    ok = client.post(f"/api/interview/{RID}/submit_answer", json={"question_index": 0, "question": "Q?", "answer": "-"})
+    ok = client.post(f"/api/interview/{RID}/submit_answer", headers=auth, json={"question_index": 0, "question": "Q?", "answer": "-"})
     assert ok.status_code == 200
     past = "2020-01-01T00:00:00+00:00"
     store.update("resumes", {"report": {"interviewConfig": {"durationMinutes": 5}, "interviewStartedAt": past}}, {"id": RID})
     store.update("candidate_interview_data", {"interview_started_at": past}, {"id": RID})
     resumes._cache.clear()
-    late = client.post(f"/api/interview/{RID}/submit_answer", json={"question_index": 1, "question": "Q?", "answer": "-"})
+    late = client.post(f"/api/interview/{RID}/submit_answer", headers=auth, json={"question_index": 1, "question": "Q?", "answer": "-"})
     assert late.status_code == 409
     assert interviews.timing(RID)["remainingSeconds"] == 0
 

@@ -75,7 +75,10 @@ def store(monkeypatch):
     admin_accounts.invalidate_cache()
     saml.reset_replay_cache()
     resumes._cache.clear()
-    for name in ("ADMIN_PASSWORD", "SCREENING_ADMIN_PASSWORD"):
+    for name in (
+        "ADMIN_PASSWORD", "SCREENING_ADMIN_PASSWORD",
+        "SMTP_HOST", "SMTP_USER", "SMTP_PASS", "SMTP_FROM",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("SAML_ENABLED", "0")
     monkeypatch.setenv("SAML_ADMIN_SSO", "0")

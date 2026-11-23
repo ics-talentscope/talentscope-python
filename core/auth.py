@@ -2,8 +2,9 @@ from typing import Optional
 
 from fastapi import Depends, Request
 
+from core import tenancy
 from core.errors import ApiError
-from core.tokens import token_email, verify_token
+from core.tokens import token_claims, token_email, verify_token
 
 
 def bearer_token(request: Request) -> str:
@@ -12,8 +13,14 @@ def bearer_token(request: Request) -> str:
 
 
 def admin_token(request: Request) -> str:
-    # Never accept tokens from query strings (leaks via logs / Referer / history).
-    return bearer_token(request)
+    token = bearer_token(request)
+    if token:
+        return token
+    # Legacy inline token support for GET-only asset downloads (video, files).
+    # Never accept query tokens for state-changing requests.
+    if str(getattr(request, "method", "")).upper() == "GET":
+        return str((getattr(request, "query_params", {}) or {}).get("token") or "")
+    return ""
 
 
 def is_admin_request(request: Request) -> bool:
@@ -27,6 +34,17 @@ def require_admin(request: Request) -> str:
     email = admin_email(request)
     if not email:
         raise ApiError(401, "Unauthorized")
+    claims = token_claims(admin_token(request)) or {}
+    expected = tenancy.client_for_email(email)
+    claimed = claims.get("client")
+    # Reject stale/unknown identities and client claims (e.g. tokens issued
+    # before a client rename) instead of silently falling back to Infinite.
+    if not expected:
+        raise ApiError(401, "Unauthorized")
+    if claimed is not None and (claimed not in tenancy.CLIENTS or tenancy.normalize_client(claimed) != expected):
+        raise ApiError(401, "Unauthorized")
+    # The signed token is authoritative for the request's client environment.
+    tenancy.set_client(expected)
     return email
 
 
@@ -35,8 +53,30 @@ def admin_email(request: Request) -> Optional[str]:
 
 
 def acting_admin_email(request: Request) -> Optional[str]:
-    # Authz/audit actor must come from the JWT only — never body/?email=.
-    return admin_email(request)
+    """Return the admin identity used for per-admin data filtering and audit.
+
+    The JWT remains authoritative for authentication and authorization. A
+    super admin may use the legacy ``?email=`` parameter to act as one of their
+    own named/screening admins for filtered views. This override is
+    downward-only: a restricted token can never escalate to another identity.
+    """
+    token_email = admin_email(request)
+    override = str((getattr(request, "query_params", {}) or {}).get("email") or "").strip().lower()
+    if not token_email or not override:
+        return token_email
+    from services import admin_accounts
+
+    if not admin_accounts.is_super_admin(token_email):
+        return token_email
+    if tenancy.client_for_email(override) != tenancy.client_for_email(token_email):
+        return token_email
+    allowed = (
+        admin_accounts.is_super_admin(override)
+        or admin_accounts.get_named_record(override) is not None
+        or admin_accounts.find_named_by_alias(override) is not None
+        or admin_accounts.is_screening_only(override)
+    )
+    return override if allowed else token_email
 
 
 def require_permission(permission: str):
@@ -59,6 +99,17 @@ def require_any_permission(*permissions: str):
         return email
 
     return check
+
+
+def require_slalom_bootcamp_admin(request: Request, email: str = Depends(require_admin)) -> str:
+    """Require an authenticated Slalom admin with bootcamp management access."""
+    from services import admin_accounts
+
+    if not admin_accounts.can_manage_slalom_bootcamp(email):
+        raise ApiError(403, "Slalom bootcamp management access is required.")
+    if tenancy.current_client() != "slalom":
+        raise ApiError(403, "Slalom bootcamp management access is required.")
+    return email
 
 
 def employee_id_from_request(request: Request) -> Optional[str]:

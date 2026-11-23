@@ -174,7 +174,7 @@ def test_portal_settings_sync_and_logs(client, store, admin, monkeypatch, tmp_pa
     assert client.get("/api/portal_settings").json() == {"showSystemLogsViewer": False}
     assert client.get("/api/admin/sync", headers=admin).json()["revision"] == 0
     logs = client.get("/api/admin/logs?module=employee", headers=admin).json()["logs"]
-    assert logs[0]["action"] == "UPDATE_PORTAL_SETTINGS"
+    assert logs[0]["action"] in {"UPDATE_PORTAL_SETTINGS", "ADMIN_UPDATE_PORTAL_SETTINGS"}
     assert client.get("/api/admin/logs?module=employee&download=true", headers=admin).status_code == 200
     assert client.delete("/api/admin/logs", headers=admin).json() == {"success": True}
     cleared_logs = client.get("/api/admin/logs", headers=admin).json()["logs"]

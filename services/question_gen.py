@@ -8,6 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
+from core import tenancy
 from core.db import get_store
 from services import llm
 
@@ -156,23 +157,25 @@ def sections(config: dict) -> dict:
     return {key: _section(config, key, default) for key, default in {**DEFAULT_SECTIONS, "behavioral": 5, "leadership": 5, "softskills": 5}.items()}
 
 
-_bank_cache: dict = {"at": 0.0, "rows": []}
+_bank_cache: dict[str, tuple[float, list]] = {}
 
 
 def bank_rows() -> list[dict]:
-    if time.monotonic() - _bank_cache["at"] < BANK_CACHE_S:
-        return _bank_cache["rows"]
+    client = tenancy.current_client()
+    hit = _bank_cache.get(client)
+    if hit and time.monotonic() - hit[0] < BANK_CACHE_S:
+        return hit[1]
     try:
         rows = get_store().select("interview_question_bank", columns=["bank_key", "kind", "language", "difficulty", "question_text"])
     except Exception as err:
         log.warning("question bank unavailable: %s", err)
         rows = []
-    _bank_cache.update(at=time.monotonic(), rows=rows)
+    _bank_cache[client] = (time.monotonic(), rows)
     return rows
 
 
 def reset_bank_cache() -> None:
-    _bank_cache.update(at=0.0, rows=[])
+    _bank_cache.clear()
 
 
 def _pool(kind: str, keys: list[str], language: Optional[str] = None) -> list[str]:

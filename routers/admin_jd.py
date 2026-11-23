@@ -70,7 +70,7 @@ def list_jds(request: Request):
         unique.sort(key=lambda j: _ts(j["createdAt"]), reverse=True)
         if not email or admin_accounts.can_view_org_screening_data(email):
             return {"jds": unique}
-        return {"jds": [j for j in unique if (j["rmEmail"] or "").lower().strip() in (email, "admin@infinite.com", "")]}
+        return {"jds": [j for j in unique if (j["rmEmail"] or "").lower().strip() in (email, admin_accounts.default_admin_email(), "")]}
     except Exception as err:
         log.error("Failed to read JDs: %s", err)
         return json_error(500, "Failed to read Job Descriptions")
@@ -80,13 +80,13 @@ def list_jds(request: Request):
 async def save_jd(request: Request):
     ip = get_client_ip(request)
     try:
-        jd_text, rm_email, file_name, jd_id, requested = "", "admin@infinite.com", "Pasted Job Description", "", ""
+        jd_text, rm_email, file_name, jd_id, requested = "", admin_accounts.default_admin_email(), "Pasted Job Description", "", ""
         is_update = False
         store = get_store()
         if "multipart/form-data" in (request.headers.get("content-type") or ""):
             form = await request.form()
             upload = form.get("file")
-            rm_email = str(form.get("rmEmail") or "admin@infinite.com").lower().strip()
+            rm_email = str(form.get("rmEmail") or admin_accounts.default_admin_email()).lower().strip()
             if upload is None or not hasattr(upload, "read"):
                 return json_error(400, "No file provided")
             data = await upload.read()
@@ -100,7 +100,7 @@ async def save_jd(request: Request):
         else:
             body = await request.json()
             jd_text = body.get("jd") or ""
-            rm_email = body.get("rmEmail") or "admin@infinite.com"
+            rm_email = body.get("rmEmail") or admin_accounts.default_admin_email()
             jd_id = body.get("jdId") or ""
             requested = body["createdAt"].strip() if isinstance(body.get("createdAt"), str) else ""
             if jd_id:
@@ -121,7 +121,7 @@ async def save_jd(request: Request):
         rm = rm_email.lower().strip()
         store.upsert("job_descriptions", {"id": new_id, "jd_text": jd_text.strip(), "rm_email": rm, "file_name": file_name,
                                           "created_at": created}, "id")
-        audit.add_log(rm_email or "admin@infinite.com", "ADMIN_UPDATE_JD" if is_update else "ADMIN_CREATE_JD", file_name or new_id,
+        audit.add_log(rm_email or admin_accounts.default_admin_email(), "ADMIN_UPDATE_JD" if is_update else "ADMIN_CREATE_JD", file_name or new_id,
                       f"JD ID: {new_id}. Associated RM: {rm_email}", ip)
         write_log("requirements", "UPDATE_JD" if is_update else "CREATE_JD", "success",
                   f"Successfully {'updated' if is_update else 'created'} JD ID: {new_id} ({file_name}). Associated RM: {rm_email}")
@@ -159,7 +159,7 @@ async def delete_jd(request: Request):
         to_delete = list(dict.fromkeys([*ids, *[str(r["id"]) for r in matching]]))
         store.delete("job_descriptions", {"id": to_delete})
         text = f"Successfully deleted JD ID{'s' if len(ids) > 1 else ''}: {', '.join(ids)}"
-        audit.add_log("admin@infinite.com", "ADMIN_BATCH_DELETE_JD" if len(ids) > 1 else "ADMIN_DELETE_JD", ", ".join(ids), text, ip)
+        audit.add_log(admin_accounts.default_admin_email(), "ADMIN_BATCH_DELETE_JD" if len(ids) > 1 else "ADMIN_DELETE_JD", ", ".join(ids), text, ip)
         write_log("requirements", "BATCH_DELETE_JD" if len(ids) > 1 else "DELETE_JD", "success", text)
         bump_sync("jd_delete")
         return {"success": True, "deletedCount": len(ids)}

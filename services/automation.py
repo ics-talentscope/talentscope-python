@@ -9,7 +9,7 @@ from typing import Optional
 
 from core.db import get_store
 from core.security import safe_storage_filename
-from services import corp_pool, dashboard_sync, deleted_requirements as deleted_req, docs_storage, jd_to_br, resumes, skill_match
+from services import admin_accounts, corp_pool, dashboard_sync, deleted_requirements as deleted_req, docs_storage, jd_to_br, resumes, skill_match
 from services.structured_log import write_log
 
 log = logging.getLogger("talentscope")
@@ -531,7 +531,7 @@ def parse_br_workbook(data: bytes, source: str) -> list[dict]:
             composed = compose_requirement_text(designation or "Technical Role", skills, body)
             if composed:
                 out.append({"autoReqId": auto_id, "designation": designation or "Technical Role", "skills": skills, "jdBody": body,
-                            "rmEmail": rm.lower() if "@" in rm else "admin@infinite.com", "sourceFile": source, "composedText": composed})
+                            "rmEmail": rm.lower() if "@" in rm else admin_accounts.default_admin_email(), "sourceFile": source, "composedText": composed})
     return out
 
 
@@ -557,7 +557,7 @@ def merge_br_requirements(rows: list[dict]) -> list[dict]:
 
 def _real_rm(value) -> bool:
     email = str(value or "").strip().lower()
-    return "@" in email and email != "admin@infinite.com"
+    return "@" in email and email != admin_accounts.default_admin_email()
 
 
 def prefer_rm(existing, incoming, actor, prefer_actor=False) -> str:
@@ -570,7 +570,7 @@ def prefer_rm(existing, incoming, actor, prefer_actor=False) -> str:
         return norm(actor)
     if _real_rm(existing):
         return norm(existing)
-    return norm(existing) or norm(incoming) or "admin@infinite.com"
+    return norm(existing) or norm(incoming) or admin_accounts.default_admin_email()
 
 
 def refresh_requirements(incoming_br: Optional[list[tuple[str, bytes]]] = None, incoming_jd: Optional[list[tuple[str, bytes]]] = None,
@@ -678,7 +678,7 @@ def refresh_candidates(active_jd_id: Optional[str] = None) -> dict:
                 if report.get("jdId") == jd_id:
                     duplicates += 1
                     continue
-            result = resumes.process_resume(file, data, jd_text, jd_id, "admin@infinite.com", False, wait=True)
+            result = resumes.process_resume(file, data, jd_text, jd_id, admin_accounts.default_admin_email(), False, wait=True)
             processed += 1
             score = (result.get("report") or {}).get("jdMatchScore") or (result.get("analysis") or {}).get("overallScore") or 0
             name = (result.get("parsed") or {}).get("personal", {}).get("fullName") or re.sub(r"\.[^/.]+$", "", file)

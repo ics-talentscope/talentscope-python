@@ -5,6 +5,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
+from core import tenancy
+from core.db import get_store
+
 DATA_PATH = Path(__file__).resolve().parents[1] / "data" / "topic_sources.json"
 log = logging.getLogger("talentscope")
 
@@ -44,14 +47,45 @@ ACRONYMS = {
 }
 
 
-@lru_cache(maxsize=1)
-def _load_sources() -> dict:
+def _tenant_source_rows(client: str) -> list[dict]:
+    try:
+        with tenancy.client_context(client):
+            return get_store().select(
+                "bootcamp_content",
+                {"content_type": "source", "is_active": True},
+                ["content_key", "payload"],
+                "created_at asc",
+            )
+    except Exception as err:
+        log.warning("Could not load tenant topic sources: %s", err)
+        return []
+
+
+@lru_cache(maxsize=None)
+def _sources_cached(client: str) -> dict:
+    data: dict = {}
     try:
         if DATA_PATH.exists():
-            return json.loads(DATA_PATH.read_text(encoding="utf-8"))
+            data = json.loads(DATA_PATH.read_text(encoding="utf-8"))
     except Exception as err:
         log.error("Failed to load topic_sources.json: %s", err)
-    return {}
+    for row in _tenant_source_rows(client):
+        payload = row.get("payload")
+        key = str(row.get("content_key") or "").strip().lower()
+        if isinstance(payload, dict) and key:
+            data[key] = payload
+            topic_id = str(payload.get("topic_id") or "").strip().lower()
+            if topic_id:
+                data[topic_id] = payload
+    return data
+
+
+def _load_sources() -> dict:
+    return _sources_cached(tenancy.current_client())
+
+
+def invalidate_content_cache() -> None:
+    _sources_cached.cache_clear()
 
 
 def format_title_case(text: str) -> str:

@@ -8,11 +8,12 @@ import anyio
 from fastapi import APIRouter, Body, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
+from core import tenancy
 from core.auth import bearer_token, is_admin_request
 from core.db import get_store
 from core.errors import ApiError, json_error, public_error
 from core.security import get_client_ip, inspect_upload, is_rate_limited_any, rate_limited_response
-from core.tokens import sign_interview_token, verify_interview_token
+from core.tokens import sign_interview_token, token_claims, verify_interview_token
 from core.validation import as_email, as_uuid
 from services.structured_log import write_log
 from services import ai, audit, identity, interviews, llm, mailer, question_queue, resumes, sessions, storage
@@ -44,8 +45,12 @@ def _require_interview_access(request: Request, interview_id: str) -> str:
         raise ApiError(400, "Invalid interview id")
     token = bearer_token(request)
     if verify_interview_token(token, resume_id):
+        claims = token_claims(token) or {}
+        tenancy.set_client(claims.get("client") if claims.get("client") in tenancy.CLIENTS
+                           else sessions.find_resume_client(resume_id))
         return resume_id
     if is_admin_request(request):
+        # Client comes from the signed admin token, never from the resource.
         return resume_id
     raise ApiError(401, "Interview session required")
 
@@ -63,7 +68,9 @@ def request_access_code(request: Request, body: dict = Body(default_factory=dict
         account_limit = is_rate_limited_any([f"interview:code:acct:{email}"], 3, 10 * 60_000)
         if account_limit.limited:
             return rate_limited_response(account_limit, "Too many attempts. Please try again later.")
-        session = sessions.get_session_by_email(email)
+        session = sessions.find_session_by_email_any_client(email)
+        if session:
+            tenancy.set_client(session.get("clientId"))
         challenge = sessions.issue_access_code(email) if session else None
         if not challenge:
             return {"success": True, "message": "If this email is eligible, a verification code will be sent."}
@@ -119,10 +126,12 @@ def access(request: Request, body: dict = Body(default_factory=dict)):
         if password is not None:
             return json_error(401, "Sign-in failed. Check your email and temporary password, or ask HR to resend the invitation.")
         return json_error(401, "The verification code is invalid or expired. Request a new code and try again.")
+    tenancy.set_client(session.get("clientId"))
     resume_id = session["resumeId"]
     if not resumes.get_resume(resume_id):
         return json_error(404, "Associated resume record was not found. Please contact HR.")
-    return {"success": True, "resumeId": resume_id, "interviewToken": sign_interview_token(resume_id)}
+    return {"success": True, "resumeId": resume_id,
+            "interviewToken": sign_interview_token(resume_id, client=session.get("clientId"))}
 
 
 @router.get("/{interview_id}/questions")

@@ -99,6 +99,41 @@ def test_proctoring_cooldown_and_auto_submit(client, world, store, monkeypatch):
     assert third["autoSubmit"] is True and third["proctoring"]["warningCount"] == 3
 
 
+def test_proctoring_distinct_types_count_without_global_cooldown(client, world, store):
+    started_at = datetime.now(timezone.utc).isoformat()
+    store.update("tests", {"status": "in_progress", "started_at": started_at}, {"id": TEST_ID})
+
+    first = client.post(f"/api/employee/tests/{TEST_ID}/proctor_violation", headers=world,
+                        json={"violationType": "Tab Switch Detected"}).json()
+    second = client.post(f"/api/employee/tests/{TEST_ID}/proctor_violation", headers=world,
+                         json={"violationType": "Right Click Attempted"}).json()
+    third = client.post(f"/api/employee/tests/{TEST_ID}/proctor_violation", headers=world,
+                        json={"violationType": "Looking Down (possible phone usage)"}).json()
+
+    assert first["proctoring"]["warningCount"] == 1
+    assert second["proctoring"]["warningCount"] == 2
+    assert third["autoSubmit"] is True
+    assert third["proctoring"]["warningCount"] == 3
+
+
+def test_proctoring_face_missing_cooldown_persists_without_blocking_strikes(client, world, store):
+    started_at = datetime.now(timezone.utc).isoformat()
+    store.update("tests", {"status": "in_progress", "started_at": started_at}, {"id": TEST_ID})
+
+    first = client.post(f"/api/employee/tests/{TEST_ID}/proctor_violation", headers=world,
+                        json={"violationType": "Face Missing"}).json()
+    duplicate = client.post(f"/api/employee/tests/{TEST_ID}/proctor_violation", headers=world,
+                            json={"violationType": "Face Missing"}).json()
+    strike = client.post(f"/api/employee/tests/{TEST_ID}/proctor_violation", headers=world,
+                         json={"violationType": "Tab Switch Detected"}).json()
+
+    assert first["proctoring"]["faceMissingEvents"] == 1
+    assert duplicate["proctoring"]["faceMissingEvents"] == 1
+    assert duplicate["proctoring"]["warningCount"] == 0
+    assert strike["proctoring"]["warningCount"] == 1
+    assert "Tab Switch Detected" in strike["proctoring"]["lastViolationAtByType"]
+
+
 def test_employee_cannot_reset_own_test(client, world, store):
     original_questions = et.questions_for(TEST_ID)
     res = client.delete(f"/api/employee/tests/{TEST_ID}", headers=world)

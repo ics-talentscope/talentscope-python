@@ -16,6 +16,9 @@ SWEEP_INTERVAL_S = 120
 
 MAX_VIOLATIONS = 3
 VIOLATION_COOLDOWN_MS = 2500
+# Keep the server cooldowns in step with the browser proctor hook: a global
+# cooldown silently dropped different violation types fired within 2.5s.
+FACE_GESTURE_COOLDOWN_MS = 8000
 # Face Missing flicker was burning 3 strikes in ~15s and auto-submitting fair attempts.
 FACE_MISSING_COOLDOWN_MS = 45_000
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
@@ -30,6 +33,33 @@ def _ms(value) -> float:
         return datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp() * 1000
     except ValueError:
         return 0
+
+
+def _cooldown_ms(violation_type: str) -> int:
+    t = (violation_type or "").lower()
+    if "face missing" in t or "face not" in t:
+        return FACE_MISSING_COOLDOWN_MS
+    if "face" in t or "looking" in t or "multiple" in t:
+        return FACE_GESTURE_COOLDOWN_MS
+    return VIOLATION_COOLDOWN_MS
+
+
+def _last_by_type(existing: dict) -> dict:
+    """Migrate legacy global lastViolationAt into a per-type cooldown map."""
+    stored = existing.get("lastViolationAtByType")
+    if isinstance(stored, dict):
+        return {str(k): str(v) for k, v in stored.items() if k and v}
+
+    by_type = {}
+    legacy_at = existing.get("lastViolationAt")
+    if legacy_at:
+        for violation in reversed(existing.get("violations") or []):
+            if not isinstance(violation, dict):
+                continue
+            if violation.get("type") and violation.get("timestamp") == legacy_at:
+                by_type[str(violation["type"])] = str(legacy_at)
+                break
+    return by_type
 
 
 def classify(violation_type: str) -> dict:
@@ -53,7 +83,8 @@ def classify(violation_type: str) -> dict:
 
 def empty_proctoring() -> dict:
     return {"warningCount": 0, "violations": [], "autoSubmitted": False, "sessionStartedAt": None,
-            "videoUploaded": False, "lastViolationAt": None}
+            "videoUploaded": False, "lastViolationAt": None, "lastViolationAtByType": {},
+            "lastFaceMissingAt": None, "faceMissingEvents": 0}
 
 
 def normalize_proctoring(raw) -> dict:
@@ -73,28 +104,37 @@ def normalize_proctoring(raw) -> dict:
         warnings = int(raw.get("warningCount") or 0)
     except (TypeError, ValueError):
         warnings = 0
+    try:
+        face_missing_events = int(raw.get("faceMissingEvents") or 0)
+    except (TypeError, ValueError):
+        face_missing_events = 0
     return {"warningCount": warnings, "violations": violations, "autoSubmitted": bool(raw.get("autoSubmitted")),
             "sessionStartedAt": raw.get("sessionStartedAt"), "videoUploaded": bool(raw.get("videoUploaded")),
-            "lastViolationAt": raw.get("lastViolationAt")}
+            "lastViolationAt": raw.get("lastViolationAt"), "lastViolationAtByType": _last_by_type(raw),
+            "lastFaceMissingAt": raw.get("lastFaceMissingAt"), "faceMissingEvents": face_missing_events}
 
 
 def record_violation(existing: dict, violation_type: str, detail=None, category=None, severity=None) -> dict:
     t = (violation_type or "").lower()
+    type_key = violation_type[:120]
     is_face_missing = "face missing" in t or "face not" in t
     now_ms = datetime.now(timezone.utc).timestamp() * 1000
+    now = _now()
+    by_type = _last_by_type(existing)
     # Keep Face Missing cooldown separate so it cannot suppress hard strikes.
     if is_face_missing:
         last_face = _ms(existing.get("lastFaceMissingAt")) if existing.get("lastFaceMissingAt") else 0
         if last_face and now_ms - last_face < FACE_MISSING_COOLDOWN_MS:
             return existing
     else:
-        last = _ms(existing["lastViolationAt"]) if existing.get("lastViolationAt") else 0
-        if last and now_ms - last < VIOLATION_COOLDOWN_MS:
+        # Cooldown is per violation type, matching the browser proctor hook.
+        # A global cooldown silently dropped distinct violations fired in a burst.
+        last_for_type = _ms(by_type[type_key]) if by_type.get(type_key) else 0
+        if last_for_type and now_ms - last_for_type < _cooldown_ms(type_key):
             return existing
-    cls = classify(violation_type)
-    now = _now()
+    cls = classify(type_key)
     entry = {
-        "type": violation_type[:120],
+        "type": type_key,
         "timestamp": now,
         "category": category or cls["category"],
         "severity": severity or cls["severity"],
@@ -107,13 +147,16 @@ def record_violation(existing: dict, violation_type: str, detail=None, category=
             **existing,
             "lastFaceMissingAt": now,
             "faceMissingEvents": int(existing.get("faceMissingEvents") or 0) + 1,
+            "lastViolationAtByType": by_type,
             "violations": [*existing["violations"], entry],
         }
     count = min(MAX_VIOLATIONS, (existing.get("warningCount") or 0) + 1)
+    by_type[type_key] = now
     return {
         **existing, "warningCount": count,
         "autoSubmitted": bool(existing.get("autoSubmitted")) or count >= MAX_VIOLATIONS,
         "lastViolationAt": now,
+        "lastViolationAtByType": by_type,
         "violations": [*existing["violations"], entry],
     }
 

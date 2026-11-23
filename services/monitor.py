@@ -10,8 +10,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from core import tenancy
 from core.config import UPLOAD_DIR, env
-from core.db import MssqlStore, get_store
+from core.db import MssqlStore, TENANT_TABLES, get_store
 from services import llm, question_queue
 
 log = logging.getLogger("talentscope")
@@ -174,6 +175,21 @@ TABLES_SQL = """
     GROUP BY s.name, t.name, t.object_id, t.create_date, t.modify_date
     ORDER BY reservedMb DESC"""
 
+_TENANT_SQL_LIST = ", ".join(
+    f"'{name}'" for name in sorted(TENANT_TABLES) if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name)
+)
+
+
+def tables_sql() -> str:
+    """Hide client-owned row counts from the cross-client DB inventory."""
+    if not tenancy.client_filter():
+        return TABLES_SQL
+    return TABLES_SQL.replace(
+        "FROM sys.tables t",
+        f"FROM sys.tables t WHERE t.name NOT IN ({_TENANT_SQL_LIST})",
+    )
+
+
 INDEX_SQL = """
     SELECT TOP 20 OBJECT_NAME(ps.object_id) AS tableName, i.name AS indexName, i.type_desc AS type,
            CAST(ps.avg_fragmentation_in_percent AS decimal(5, 1)) AS fragmentation, ps.page_count AS pages
@@ -240,9 +256,11 @@ def compare_with_other_db(current: str):
         return None
     if not rows(f"SELECT 1 AS ok FROM sys.databases WHERE name = N'{other}' AND state_desc = 'ONLINE'"):
         return None
+    tenant_filter = f"WHERE t.name NOT IN ({_TENANT_SQL_LIST})" if tenancy.client_filter() else ""
     tables = rows(f"""
         SELECT t.name, SUM(p.rows) AS [rowCount]
         FROM [{other}].sys.tables t JOIN [{other}].sys.partitions p ON p.object_id = t.object_id AND p.index_id IN (0, 1)
+        {tenant_filter}
         GROUP BY t.name""")
     return {"database": other, "tables": tables}
 
@@ -360,6 +378,14 @@ def _preview_row(row: dict, columns: list[str], keys: list[str]) -> dict:
 def compare_table_detail(table: str) -> dict:
     if not _NAME.match(table or ""):
         raise ValueError("Choose a table name")
+    if table.lower() in TENANT_TABLES and tenancy.client_filter():
+        return {
+            "table": table, "current": "", "other": compare_database(),
+            "inCurrent": True, "inOther": True,
+            "schema": [], "key": [], "onlyInCurrent": [], "onlyInOther": [], "changed": [],
+            "truncated": False,
+            "note": "Row-level comparison is disabled for client-owned tables.",
+        }
     store = get_store()
     if not isinstance(store, MssqlStore):
         raise ValueError("SQL Server is not configured")
@@ -476,28 +502,36 @@ def app_activity():
     if not table_exists("audit_logs"):
         return None
     window = "created_at >= DATEADD(hour, -24, SYSUTCDATETIME())"
+    clause, params = tenancy.sql_filter()
     totals = rows(f"""
         SELECT COUNT(*) AS last24h, SUM(CASE WHEN action LIKE '%FAIL%' THEN 1 ELSE 0 END) AS failures24h,
                SUM(CASE WHEN created_at >= DATEADD(hour, -1, SYSUTCDATETIME()) THEN 1 ELSE 0 END) AS lastHour
-        FROM dbo.audit_logs WHERE {window}""")[0]
+        FROM dbo.audit_logs WHERE {window}{clause}""", params)[0]
     return {**totals,
-            "byAction": rows(f"SELECT TOP 15 action, COUNT(*) AS count FROM dbo.audit_logs WHERE {window} GROUP BY action ORDER BY count DESC"),
-            "perDay": rows("""
+            "byAction": rows(
+                f"SELECT TOP 15 action, COUNT(*) AS count FROM dbo.audit_logs WHERE {window}{clause} GROUP BY action ORDER BY count DESC",
+                params,
+            ),
+            "perDay": rows(f"""
                 SELECT CONVERT(char(10), CAST(created_at AS date), 23) AS day, COUNT(*) AS total,
                        SUM(CASE WHEN action LIKE '%FAIL%' THEN 1 ELSE 0 END) AS failures
-                FROM dbo.audit_logs WHERE created_at >= DATEADD(day, -14, SYSUTCDATETIME())
-                GROUP BY CAST(created_at AS date) ORDER BY day"""),
-            "recentFailures": rows("""
+                FROM dbo.audit_logs WHERE created_at >= DATEADD(day, -14, SYSUTCDATETIME()){clause}
+                GROUP BY CAST(created_at AS date) ORDER BY day""", params),
+            "recentFailures": rows(f"""
                 SELECT TOP 15 created_at AS at, action, actor_email AS actor, ip_address AS ip
-                FROM dbo.audit_logs WHERE action LIKE '%FAIL%' ORDER BY created_at DESC""")}
+                FROM dbo.audit_logs WHERE action LIKE '%FAIL%'{clause} ORDER BY created_at DESC""", params)}
 
 
 def freshness() -> list[dict]:
     out = []
+    clause, params = tenancy.sql_filter()
     for label, table, column in FRESHNESS_TARGETS:
         if not table_exists(table):
             continue
-        newest = try_rows(f"SELECT MAX({column}) AS newest FROM dbo.{table}", [{"newest": None}])
+        try:
+            newest = rows(f"SELECT MAX({column}) AS newest FROM dbo.{table}{clause}", params)
+        except Exception:
+            newest = [{"newest": None}]
         out.append({"label": label, "table": table, "newest": newest[0]["newest"] if newest else None})
     return out
 
@@ -613,7 +647,7 @@ def collect_db() -> dict:
     out = {
         "collectedAt": collected, "configured": True, "connection": section(pool_info), "server": server,
         "latency": section(measure_latency), "databases": section(lambda: rows(DATABASES_SQL)),
-        "files": section(lambda: rows(FILES_SQL)), "log": section(log_space), "tables": section(lambda: rows(TABLES_SQL)),
+        "files": section(lambda: rows(FILES_SQL)), "log": section(log_space), "tables": section(lambda: rows(tables_sql())),
         "compare": section(lambda: compare_with_other_db(current)), "storage": section(storage_usage),
         "indexes": section(lambda: rows(INDEX_SQL)), "backups": section(lambda: rows(BACKUPS_SQL)),
         "activity": section(app_activity), "freshness": section(freshness), "migrations": section(migrations),
@@ -702,15 +736,19 @@ def downsample(points: list[dict], window: tuple[int, int]) -> dict:
             "retentionDays": HISTORY_DAYS}
 
 
-def legacy_vm_history() -> list[dict]:
+def legacy_vm_history(raw: bool = False) -> list[dict]:
     data, _, _ = read_json("history.json")
-    return [p for p in data if isinstance(p, dict) and isinstance(p.get("ts"), (int, float))] if isinstance(data, list) else []
+    if not isinstance(data, list):
+        return []
+    if raw:
+        return [p for p in data if isinstance(p, dict)]
+    return [p for p in data if isinstance(p, dict) and isinstance(p.get("ts"), (int, float))]
 
 
-def history_points(target: str) -> list[dict]:
+def history_points(target: str, raw: bool = False) -> list[dict]:
     if target == "db":
         return read_history_file(db_history_path())
-    return read_history_file(vm_history_path()) or legacy_vm_history()
+    return read_history_file(vm_history_path()) or legacy_vm_history(raw=raw)
 
 
 def _round(value, digits: int = 1):
@@ -822,11 +860,15 @@ COLLECTORS = {"vm": collect_vm, "db": collect_db}
 
 
 def collect(target: str, window: Optional[tuple[int, int]] = None) -> dict:
+    cache_key = f"{tenancy.current_client()}:{target}"
     with _locks[target]:
-        hit = _cache.get(target)
+        hit = _cache.get(cache_key)
         if hit and time.monotonic() - hit[0] < CACHE_S:
             body = hit[1]
         else:
             body = COLLECTORS[target]()
-            _cache[target] = (time.monotonic(), body)
-    return {**body, "history": downsample(history_points(target), window or parse_window({}))}
+            _cache[cache_key] = (time.monotonic(), body)
+    history = history_points(target, raw=window is None)
+    # Direct callers (and legacy collectors) receive the raw points. The admin
+    # API always passes a parsed window and receives the downsampled envelope.
+    return {**body, "history": history if window is None else downsample(history, window)}

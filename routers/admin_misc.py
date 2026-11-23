@@ -40,7 +40,7 @@ def update_portal_settings(request: Request, body: dict = Body(default_factory=d
     try:
         updated = settings.update_portal_features(new_settings)
         details = f"Updated portal settings: SystemLogsViewer={updated['showSystemLogsViewer']}"
-        audit.add_log(actor or "admin@infinite.com", "ADMIN_UPDATE_PORTAL_SETTINGS", "portal-settings", details, get_client_ip(request))
+        audit.add_log(actor or admin_accounts.default_admin_email(), "ADMIN_UPDATE_PORTAL_SETTINGS", "portal-settings", details, get_client_ip(request))
         write_log("employee", "UPDATE_PORTAL_SETTINGS", "success", details)
         return {"success": True, "settings": updated}
     except Exception as err:

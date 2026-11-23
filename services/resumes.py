@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from core import tenancy
 from core.db import get_store
 from services import ai, sessions, storage
 
@@ -471,7 +472,7 @@ def save_row(resume: dict) -> None:
         "file_base64": resume.get("fileBase64"),
     }
     with _cache_lock:
-        _cache[resume["id"]] = resume
+        _cache[f"{tenancy.current_client()}:{resume['id']}"] = resume
     try:
         get_store().upsert("resumes", row, "id")
     except Exception as err:
@@ -479,9 +480,10 @@ def save_row(resume: dict) -> None:
 
 
 def get_resume(resume_id: str, force_fresh: bool = False) -> Optional[dict]:
+    cache_key = f"{tenancy.current_client()}:{resume_id}"
     if not force_fresh:
         with _cache_lock:
-            cached = _cache.get(resume_id)
+            cached = _cache.get(cache_key)
         if cached:
             _apply_source_skills(cached)
             return cached
@@ -490,7 +492,7 @@ def get_resume(resume_id: str, force_fresh: bool = False) -> Optional[dict]:
         return None
     resume = _map_row(row)
     with _cache_lock:
-        _cache[resume_id] = resume
+        _cache[cache_key] = resume
     return resume
 
 
