@@ -6,7 +6,6 @@ is scoped to the client resolved from the signed bearer token. This module is
 the single source of truth for that client identity.
 """
 
-import re
 from contextlib import contextmanager
 from contextvars import ContextVar
 from pathlib import Path

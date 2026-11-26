@@ -114,7 +114,7 @@ all levels. On the Azure VM, production files are written to `/opt/logs/prod/` a
 development files to `/opt/logs/dev/`, with names such as `2026-10-30.log`. Each line
 uses a 24-hour timestamp. Files are rotated at midnight. At 00:05 on the first day of
 each month, the previous month's daily files are verified and bundled into
-`archive/YYYY-MM.zip` inside the matching environment folder; source daily files are
+`YYYY-MM.zip` directly inside the matching environment folder; source daily files are
 removed only after the archive passes verification. The deployment scripts mount the
 VM's `/opt/logs` directory into the API container. Local `logs/` files are Git-ignored,
 excluded from Docker build contexts, and excluded explicitly from development and

@@ -92,8 +92,10 @@ def set_console_password(password: str, client: Optional[str] = None) -> None:
 
 
 def ensure_console_password(client: Optional[str] = None) -> Optional[dict]:
-    """Seed the hashed console password from the client's env var when absent."""
+    """Seed the Infinite console password from its env var when absent."""
     key = tenancy.normalize_client(client or tenancy.current_client())
+    if key == "slalom":
+        return None
     stored = console_secret(key)
     if stored:
         return stored
@@ -377,6 +379,11 @@ def authenticate(email: str, password: str) -> Optional[dict]:
         return None
     with tenancy.client_context(client):
         if user in super_admin_emails(client):
+            if client == "slalom":
+                expected = env(ADMIN_PASSWORD_ENVS[client])
+                if not expected:
+                    raise AdminPasswordNotSetup(ADMIN_PASSWORD_NOT_SETUP)
+                return get_access(user) if _env_match(password, expected) else None
             stored = ensure_console_password(client)
             if not stored:
                 raise AdminPasswordNotSetup(ADMIN_PASSWORD_NOT_SETUP)

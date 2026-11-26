@@ -1,7 +1,6 @@
 import hashlib
 import json
 import logging
-import os
 import re
 import threading
 import time
@@ -675,7 +674,7 @@ _history_lock = threading.Lock()
 
 
 def db_history_path() -> Path:
-    return UPLOAD_DIR / "monitor" / "db-history.jsonl"
+    return UPLOAD_DIR / "monitor-db-history.jsonl"
 
 
 def vm_history_path() -> Path:
@@ -843,8 +842,8 @@ def _sampler_loop() -> None:
     while True:
         try:
             sample_db_once()
-        except Exception:
-            pass
+        except Exception as err:
+            log.warning("db history sample failed: %s", err)
         time.sleep(DB_SAMPLE_S)
 
 

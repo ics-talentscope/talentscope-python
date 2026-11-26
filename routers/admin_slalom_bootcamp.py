@@ -3,23 +3,27 @@
 The routes in this module are the backend counterpart to the Slalom bootcamp
 admin screen. Authorisation is deliberately separate from the shared employee
 portal config permission: every route requires a Slalom admin with the
-``bootcampManagement`` permission.
+``bootcampManagement`` permission. Learning *content* can additionally be
+edited by a Slalom trainer employee (``role == "trainer"``).
 """
 
 import logging
 from functools import wraps
 
-from fastapi import APIRouter, Body, Depends, Request
+from fastapi import APIRouter, Body, Depends, File, Request, UploadFile
 
-from core.auth import require_slalom_bootcamp_admin
+from core import tenancy
+from core.auth import require_admin, require_employee, require_slalom_bootcamp_admin, bearer_token
 from core.db import get_store
-from core.errors import json_error, public_error
+from core.errors import ApiError, json_error, public_error
 from core.security import get_client_ip
-from services import audit, employee_portal_admin, slalom_bootcamp as bootcamp
+from core.tokens import token_client
+from services import admin_accounts, audit, employee_portal_admin, slalom_bootcamp as bootcamp
 
 log = logging.getLogger("talentscope")
 
 BASE = "/api/admin/slalom/bootcamp"
+UPLOAD_MAX_BYTES = 10 * 1024 * 1024
 ALIASES = (
     "/api/admin/slalom/bootcamps",
     "/api/admin/slalom-bootcamp",
@@ -53,6 +57,37 @@ def _audit(admin: str, request: Request, action: str, detail: str) -> None:
         audit.add_log(admin, action, "Slalom Bootcamp", detail, get_client_ip(request))
     except Exception as err:
         log.warning("Could not write bootcamp audit log: %s", err)
+
+
+def require_slalom_bootcamp_content_editor(request: Request) -> str:
+    """Allow Slalom bootcamp content editing by a Slalom bootcamp admin or a
+    Slalom trainer employee (``role == "trainer"``).
+
+    Infinite admins are never permitted to touch Slalom content, even if they
+    hold a legacy permission map entry.
+    """
+    # Path 1: Slalom bootcamp admin (admin bearer token).
+    try:
+        email = require_admin(request)
+        if admin_accounts.can_manage_slalom_bootcamp(email):
+            return email
+        raise ApiError(403, "Slalom bootcamp content editing access is required.")
+    except ApiError:
+        pass
+
+    # Path 2: Slalom trainer employee (employee bearer token).
+    try:
+        client = token_client(bearer_token(request))
+        if client != "slalom":
+            raise ApiError(403, "Slalom bootcamp content editing access is required.")
+        tenancy.set_client(client)
+        employee = require_employee(request)
+        if employee.get("role") == "trainer":
+            return str(employee.get("employee_id") or "")
+    except ApiError:
+        pass
+
+    raise ApiError(403, "Slalom bootcamp content editing access is required.")
 
 
 def _guard(fallback: str):
@@ -209,6 +244,36 @@ def build_router(prefix: str = BASE, tag: str = "slalom-bootcamp") -> APIRouter:
                      admin: str = Depends(require_slalom_bootcamp_admin)):
         return {"members": bootcamp.list_members(cohort_id)}
 
+    @router.get("/cohorts/{cohort_id}/overview")
+    @_guard("Failed to load cohort overview")
+    def cohort_overview(cohort_id: str, request: Request,
+                        admin: str = Depends(require_slalom_bootcamp_admin)):
+        return {"success": True, **bootcamp.cohort_overview(cohort_id)}
+
+    @router.post("/cohorts/{cohort_id}/learners")
+    @_guard("Failed to add cohort learners")
+    def enroll_learners(cohort_id: str, request: Request, body: dict = Body(default_factory=dict),
+                        admin: str = Depends(require_slalom_bootcamp_admin)):
+        learners = _collection(body, "learners", "employees", "members")
+        auto_assign = bool(_first(body, "autoAssign", "auto_assign", default=True))
+        result = bootcamp.enroll_learners(cohort_id, learners, admin, auto_assign)
+        _audit(admin, request, "SLALOM_BOOTCAMP_LEARNERS_ENROLLED",
+               f"Enrolled {len(result['enrolled'])} learner(s) in cohort {cohort_id}; {len(result['failed'])} failed.")
+        return {"success": True, **result}
+
+    @router.post("/cohorts/{cohort_id}/learners/upload")
+    @_guard("Failed to import cohort learners")
+    def enroll_learners_upload(cohort_id: str, request: Request, file: UploadFile = File(...),
+                               admin: str = Depends(require_slalom_bootcamp_admin)):
+        content = file.file.read(UPLOAD_MAX_BYTES + 1)
+        if len(content) > UPLOAD_MAX_BYTES:
+            return json_error(413, "Roster file must be 10 MB or smaller.")
+        learners = employee_portal_admin.parse_employee_upload(content, file.filename or "")
+        result = bootcamp.enroll_learners(cohort_id, learners, admin)
+        _audit(admin, request, "SLALOM_BOOTCAMP_LEARNERS_ENROLLED",
+               f"Imported {len(result['enrolled'])} learner(s) into cohort {cohort_id}; {len(result['failed'])} failed.")
+        return {"success": True, **result}
+
     @router.post("/cohorts/{cohort_id}/members/bulk")
     @_guard("Failed to add cohort members")
     def add_members(cohort_id: str, request: Request, body: dict = Body(default_factory=dict),
@@ -260,7 +325,7 @@ def build_router(prefix: str = BASE, tag: str = "slalom-bootcamp") -> APIRouter:
 
     @router.get("/content")
     @_guard("Failed to load bootcamp learning content")
-    def list_content(request: Request, admin: str = Depends(require_slalom_bootcamp_admin)):
+    def list_content(request: Request, admin: str = Depends(require_slalom_bootcamp_content_editor)):
         query = request.query_params
         raw_type = query.get("content_type") or query.get("contentType") or query.get("type") or ""
         content_type = _content_type(raw_type) if raw_type else ""
@@ -270,7 +335,7 @@ def build_router(prefix: str = BASE, tag: str = "slalom-bootcamp") -> APIRouter:
     @router.post("/content")
     @_guard("Failed to save bootcamp learning content")
     def save_content(request: Request, body: dict = Body(default_factory=dict),
-                     admin: str = Depends(require_slalom_bootcamp_admin)):
+                     admin: str = Depends(require_slalom_bootcamp_content_editor)):
         # Keep the submitted type intact so the service can normalise it and
         # preserve the original friendly label in the stored payload.
         result = bootcamp.save_content(dict(body), admin)
@@ -280,7 +345,7 @@ def build_router(prefix: str = BASE, tag: str = "slalom-bootcamp") -> APIRouter:
     @router.patch("/content")
     @_guard("Failed to update bootcamp learning content")
     def update_content(request: Request, body: dict = Body(default_factory=dict),
-                       admin: str = Depends(require_slalom_bootcamp_admin)):
+                       admin: str = Depends(require_slalom_bootcamp_content_editor)):
         content_id = str(request.query_params.get("id") or _first(body, "id", "contentId", "content_id", default="") or "")
         if not content_id:
             return json_error(400, "A content id is required.")
@@ -292,7 +357,7 @@ def build_router(prefix: str = BASE, tag: str = "slalom-bootcamp") -> APIRouter:
     @router.delete("/content")
     @_guard("Failed to delete bootcamp learning content")
     def delete_content(request: Request, body: dict = Body(default_factory=dict),
-                       admin: str = Depends(require_slalom_bootcamp_admin)):
+                       admin: str = Depends(require_slalom_bootcamp_content_editor)):
         content_id = str(request.query_params.get("id") or _first(body, "id", "contentId", "content_id", default="") or "")
         if not content_id:
             return json_error(400, "A content id is required.")

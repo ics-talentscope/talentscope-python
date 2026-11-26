@@ -8,11 +8,12 @@ from datetime import datetime, timezone
 from typing import Optional
 
 from core.db import get_store
-from services import accounts, test_video
+from services import accounts, assessment_attempts, storage, test_video
 from services.structured_log import write_log
 
 log = logging.getLogger("talentscope")
 SWEEP_INTERVAL_S = 120
+STALE_CHUNK_HOURS = 24
 
 MAX_VIOLATIONS = 3
 VIOLATION_COOLDOWN_MS = 2500
@@ -22,6 +23,12 @@ FACE_GESTURE_COOLDOWN_MS = 8000
 # Face Missing flicker was burning 3 strikes in ~15s and auto-submitting fair attempts.
 FACE_MISSING_COOLDOWN_MS = 45_000
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+STATUS_COMPLETED = "completed"
+
+# Every question is worth at least one mark so assessments that have not been
+# given explicit per-question marks still score as "share of questions correct".
+MIN_QUESTION_MARKS = 1
 
 
 def _now() -> str:
@@ -215,13 +222,18 @@ def questions_for(test_id: str) -> list[dict]:
     return get_store().select("test_questions", {"test_id": test_id}, order="question_index asc")
 
 
+def _has_flags(test: dict) -> bool:
+    flags = test.get("proctoring")
+    return isinstance(flags, dict) and bool(flags.get("violations") or flags.get("warningCount") or flags.get("autoSubmitted"))
+
+
 def archive_as_history(test_id: str) -> Optional[str]:
     store = get_store()
     test = store.first("tests", {"id": test_id})
     if not test or accounts.is_product_assessment_history_topic(test.get("topic_id")):
         return None
     attempts = store.select("test_attempts", {"test_id": test_id})
-    if not (test.get("status") == "completed" or test.get("score_percent") is not None or test.get("completed_at") or attempts):
+    if not (test.get("status") == "completed" or test.get("score_percent") is not None or test.get("completed_at") or attempts or _has_flags(test)):
         return None
     history_id = str(uuid.uuid4())
     title = re.sub(r"\s*\(previous(?: attempt)?\)\s*$", "", str(test.get("topic_title") or "Product Assessment"), flags=re.I)
@@ -229,7 +241,10 @@ def archive_as_history(test_id: str) -> Optional[str]:
     row.update({
         "id": history_id, "topic_id": f"{accounts.PRODUCT_ASSESSMENT_HISTORY_TOPIC_ID}:{history_id}",
         "topic_title": f"{title} (previous)", "status": "completed", "completed_at": test.get("completed_at") or _now(),
+        "session_recording_url": None,
     })
+    if isinstance(row.get("proctoring"), dict):
+        row["proctoring"] = {**row["proctoring"], "videoUploaded": False}
     store.insert("tests", row)
     id_map = {}
     copies = []
@@ -323,28 +338,67 @@ def question_attempts_batch(test_ids: list[str], include_unanswered: bool = Fals
     return out
 
 
+def _question_marks(questions: list[dict]) -> dict[str, int]:
+    return {
+        str(q["id"]): max(MIN_QUESTION_MARKS, int(q.get("marks") or 0)) for q in questions
+    }
+
+
 def finalize(test: dict, emp_uuid: Optional[str], answers: list[dict], auto: bool) -> dict:
     store = get_store()
     questions = questions_for(test["id"])
-    correct_map = {str(q["id"]): q["correct_option_index"] for q in questions}
+    marks_map = _question_marks(questions)
+    # A question is answered correctly when the candidate's selected option is
+    # one of the question's correct answers. For single-choice questions there
+    # is exactly one correct answer; for multiple-choice questions there may be
+    # several, and selecting any one of them counts as a correct selection.
+    correct_answers_map = {
+        str(q["id"]): (
+            q.get("correct_answers")
+            if isinstance(q.get("correct_answers"), list) and q.get("correct_answers")
+            else ([q["correct_option_index"]] if q.get("correct_option_index") is not None else [])
+        )
+        for q in questions
+    }
     attempts = [
         {"test_id": test["id"], "employee_id": emp_uuid, "question_id": a["question_id"],
          "selected_option_index": a.get("selected_index"),
-         "is_correct": correct_map[str(a["question_id"])] == a.get("selected_index"),
+         "is_correct": a.get("selected_index") in correct_answers_map.get(str(a["question_id"]), []),
          "time_taken_seconds": int(a.get("time_seconds") or 0), "session_key": test["id"][:8]}
-        for a in answers if isinstance(a, dict) and str(a.get("question_id")) in correct_map and isinstance(a.get("selected_index"), int)
+        for a in answers if isinstance(a, dict) and str(a.get("question_id")) in correct_answers_map and isinstance(a.get("selected_index"), int)
     ]
     if attempts:
         store.delete("test_attempts", {"test_id": test["id"]})
         store.insert("test_attempts", attempts)
     correct = sum(1 for a in attempts if a["is_correct"])
     total = test.get("total_questions") or len(questions) or len(attempts)
-    accuracy = round(correct / max(1, total) * 100)
+
+    # Weighted scoring: each question carries configurable marks. The final
+    # percentage is the share of obtainable marks earned, not the share of
+    # questions answered correctly. Questions the candidate did not attempt
+    # still count toward the available marks.
+    total_marks = sum(marks_map.values()) or total
+    correct_marks = sum(
+        marks_map.get(str(a["question_id"]), 0) for a in attempts if a["is_correct"]
+    )
+    accuracy = round(correct_marks / max(1, total_marks) * 100)
+
+    pass_threshold = int(test.get("pass_threshold") or 80)
+    passed = accuracy >= pass_threshold
+
     proctoring = normalize_proctoring(test.get("proctoring"))
     proctoring["autoSubmitted"] = proctoring["autoSubmitted"] or auto
     store.update("tests", {"status": "completed", "completed_at": _now(), "score_correct": correct, "score_total": total,
-                           "score_percent": accuracy, "ai_analysis": None, "proctoring": proctoring}, {"id": test["id"]})
-    return {"total": total, "correct": correct, "accuracy": accuracy}
+                           "score_percent": accuracy, "total_marks": total_marks, "correct_marks": correct_marks,
+                           "pass_threshold": pass_threshold, "passed": passed, "ai_analysis": None,
+                           "proctoring": proctoring}, {"id": test["id"]})
+    # Record the assessment-level attempt outcome (score + completion).
+    try:
+        assessment_attempts.complete_attempt(test["id"], accuracy, STATUS_COMPLETED)
+    except Exception as err:  # attempt tracking must never block scoring
+        log.warning("Failed to record assessment attempt completion for test %s: %s", test.get("id"), err)
+    return {"total": total, "correct": correct, "accuracy": accuracy, "passed": passed,
+            "total_marks": total_marks, "correct_marks": correct_marks}
 
 
 def saved_answers(test: dict) -> list[dict]:
@@ -389,6 +443,10 @@ def _sweeper_loop() -> None:
     time.sleep(30)
     while True:
         sweep_expired()
+        try:
+            storage.drop_stale("video_upload_chunks", STALE_CHUNK_HOURS)
+        except Exception as err:
+            log.warning("stale video chunk cleanup failed: %s", err)
         time.sleep(SWEEP_INTERVAL_S)
 
 

@@ -41,7 +41,8 @@ def subjects(employee: dict = Depends(require_employee)):
         topics = portal.learning_topics_for_employee(employee)
         if accounts.is_product_qb_employee(employee) and not accounts.is_ai_questionnaire_employee(employee):
             emp_uuid = accounts.employee_uuid(employee["employee_id"])
-            test = get_store().first("tests", {"employee_id": emp_uuid, "topic_id": accounts.PRODUCT_ASSESSMENT_TOPIC_ID}, ["id"]) if emp_uuid else None
+            tests = get_store().select("tests", {"employee_id": emp_uuid}, ["id", "topic_id"], "created_at desc") if emp_uuid else []
+            test = next((row for row in tests if accounts.is_product_assessment_topic(row.get("topic_id"))), None)
             if test:
                 for t in topics:
                     if t["id"] == accounts.PRODUCT_ASSESSMENT_TOPIC_ID:
@@ -64,11 +65,16 @@ def assigned_test(employee: dict = Depends(require_employee)):
             "tests", {"employee_id": emp_uuid, "status": "completed"},
             ["id", "topic_id", "topic_title", "total_questions", "score_correct", "score_percent", "completed_at", "status"],
             "completed_at desc", limit=20)
-        done = next((r for r in completed_rows if r["topic_id"] == accounts.PRODUCT_ASSESSMENT_TOPIC_ID
+        done = next((r for r in completed_rows if accounts.is_product_assessment_topic(r["topic_id"])
                      or accounts.is_product_assessment_history_topic(r["topic_id"])), None)
-        active = store.first("tests", [("employee_id", "eq", emp_uuid), ("topic_id", "eq", accounts.PRODUCT_ASSESSMENT_TOPIC_ID),
-                                       ("status", "in", ["pending", "in_progress"])],
-                             ["id", "topic_title", "total_questions", "status", "started_at", "completed_at", "created_at"], "created_at desc")
+        active_rows = store.select(
+            "tests", {"employee_id": emp_uuid},
+            ["id", "topic_id", "topic_title", "total_questions", "status", "started_at", "completed_at", "created_at"],
+            "created_at desc",
+        )
+        active = next((row for row in active_rows
+                       if accounts.is_product_assessment_topic(row.get("topic_id"))
+                       and row.get("status") in ("pending", "in_progress")), None)
         completed_test = None
         if done:
             total = done.get("total_questions") or 25

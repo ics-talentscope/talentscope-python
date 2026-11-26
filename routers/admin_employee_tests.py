@@ -1,14 +1,15 @@
 import hashlib
 import re
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Body, Depends, Request
 from fastapi.responses import Response
 
-from core.auth import require_permission
+from core.auth import require_admin, require_permission
 from core.db import get_store
 from core.errors import json_error, public_error
 from core.validation import as_uuid
-from services import employee_tests as et, test_backup, test_video
+from services import assessment_attempts, employee_tests as et, test_backup, test_video
+from services.structured_log import write_log
 
 router = APIRouter(prefix="/api/admin/employee-tests", tags=["admin-employee-tests"], dependencies=[Depends(require_permission("employeePortal"))])
 
@@ -65,3 +66,18 @@ def video(test_id: str, request: Request):
         return Response(data[start:end + 1], status_code=206,
                         headers={**base, "Content-Range": f"bytes {start}-{end}/{size}"})
     return Response(data, headers=base)
+
+
+@router.post("/attempts/{attempt_id}/authorize-retake")
+def authorize_retake(attempt_id: str, body: dict = Body(default_factory=dict),
+                     admin: str = Depends(require_admin)):
+    """Administrator authorizes a retake for a completed assessment attempt."""
+    tid = as_uuid(attempt_id)
+    if not tid:
+        return json_error(400, "Invalid attempt id")
+    ok = assessment_attempts.authorize_retake(tid, admin or "")
+    if not ok:
+        return json_error(404, "Assessment attempt not found")
+    write_log("admin", "ASSESSMENT_RETAKE_AUTHORIZED", "success",
+              f"{admin} authorized a retake for attempt {attempt_id}")
+    return {"success": True, "attemptId": attempt_id, "isRetakeAuthorized": True}

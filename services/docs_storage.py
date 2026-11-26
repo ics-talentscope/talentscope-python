@@ -2,17 +2,16 @@ import re
 from pathlib import Path
 from typing import Optional
 
-from core import tenancy
-from core.config import UPLOAD_DIR
 from core.security import safe_storage_filename
+from services import storage
 
 CATEGORIES = ("BR", "JD", "Resumes", "Corp Pool", "Portal Mapping")
 
 
-def _dir(category: str) -> Path:
+def _bucket(category: str) -> str:
     if category not in CATEGORIES:
         raise ValueError(f"Unknown docs category: {category}")
-    return tenancy.client_root(UPLOAD_DIR) / "docs" / category
+    return f"docs/{category}"
 
 
 def usable(name: str) -> bool:
@@ -20,15 +19,12 @@ def usable(name: str) -> bool:
 
 
 def list_files(category: str) -> list[str]:
-    path = _dir(category)
-    if not path.is_dir():
-        return []
-    return sorted(p.name for p in path.iterdir() if p.is_file() and usable(p.name))
+    return [name for name in storage.disk_names(_bucket(category)) if usable(name)]
 
 
 def _path(category: str, name: str) -> Optional[Path]:
     safe = safe_storage_filename(name)
-    return (_dir(category) / safe) if safe else None
+    return storage.disk_path(_bucket(category), safe) if safe else None
 
 
 def read_file(category: str, name: str) -> Optional[bytes]:
@@ -40,9 +36,8 @@ def write_file(category: str, name: str, data: bytes) -> str:
     path = _path(category, name)
     if not path:
         raise ValueError("Invalid file name")
-    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(data)
-    return path.name
+    return path.name[len(storage.prefix(_bucket(category))):]
 
 
 def delete_file(category: str, name: str) -> bool:

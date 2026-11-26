@@ -67,6 +67,13 @@ class SchemaStore(MemoryStore):
         return super().count(table, where)
 
 
+@pytest.fixture(autouse=True)
+def isolated_storage(tmp_path_factory, monkeypatch):
+    folder = tmp_path_factory.mktemp("storage")
+    for target in ("services.storage", "services.structured_log", "services.monitor"):
+        monkeypatch.setattr(f"{target}.UPLOAD_DIR", folder)
+
+
 @pytest.fixture()
 def store(monkeypatch):
     memory = SchemaStore()

@@ -1,5 +1,4 @@
 import logging
-import shutil
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Body, Depends, File, Form, Request, UploadFile
@@ -8,7 +7,7 @@ from core.auth import employee_id_from_request, require_employee
 from core.db import get_store
 from core.errors import json_error, public_error
 from core.validation import as_path_id
-from services import accounts, employee_tests as et, storage, test_backup, test_video
+from services import accounts, employee_tests as et, assessment_attempts, storage, test_backup, test_video
 from services.products import format_topic_title_for_display
 from services.structured_log import write_log
 
@@ -81,9 +80,10 @@ def get_test(test_id: str, employee: dict = Depends(require_employee)):
         if et.finalize_if_expired(test):
             test = _owned(test_id, employee)
         topic = test.get("topic_id")
-        if topic == accounts.PRODUCT_ASSESSMENT_TOPIC_ID and not accounts.is_product_qb_employee(employee):
+        is_product_assessment = accounts.is_product_assessment_topic(topic)
+        if is_product_assessment and not accounts.is_product_qb_employee(employee):
             return json_error(403, "Forbidden")
-        if (accounts.is_assessment_only_employee(employee) and topic != accounts.PRODUCT_ASSESSMENT_TOPIC_ID
+        if (accounts.is_assessment_only_employee(employee) and not is_product_assessment
                 and not accounts.is_product_assessment_history_topic(topic)):
             return json_error(403, "Forbidden")
         questions, attempts = _employee_questions(test)
@@ -106,6 +106,16 @@ def patch_test(test_id: str, body: dict = Body(default_factory=dict), employee: 
             return json_error(409, problem)
         if body.get("status") == "in_progress" and (test.get("status") or "pending") == "pending" and body.get("camera_granted") is not True:
             return json_error(400, "Camera access is required to start the assessment.")
+        # Enforce assessment-level attempt restrictions on the backend:
+        # one attempt per assessment, retakes require administrator authorization.
+        if body.get("status") == "in_progress" and (test.get("status") or "pending") == "pending":
+            try:
+                emp_uuid = accounts.employee_uuid(employee["employee_id"])
+                assessment_attempts.start_attempt(
+                    emp_uuid, employee["employee_id"], test.get("topic_id") or "", test["id"]
+                )
+            except PermissionError as err:
+                return json_error(409, str(err) or "Assessment attempt not allowed.")
         updates = {k: body[k] for k in ("in_progress", "current_question_index", "status", "started_at") if k in body}
         if body.get("status") == "in_progress" and body.get("started_at"):
             updates["proctoring"] = et.mark_session_started(et.normalize_proctoring(test.get("proctoring")))
@@ -265,11 +275,11 @@ async def upload_chunk(test_id: str, chunk: UploadFile = File(None), chunkIndex:
         if total < 1 or index < 0 or index >= total or chunk is None:
             return json_error(400, "Invalid chunk payload")
         data = await chunk.read()
-        folder = storage.bucket_dir(f"{CHUNK_ROOT}/{test['id']}")
-        (folder / f"{index}.part").write_bytes(data)
-        if any(not (folder / f"{i}.part").exists() for i in range(total)):
+        bucket = f"{CHUNK_ROOT}/{test['id']}"
+        storage.disk_path(bucket, f"{index}.part").write_bytes(data)
+        if any(not storage.disk_path(bucket, f"{i}.part").exists() for i in range(total)):
             return {"complete": False, "received": index, "totalChunks": total}
-        full = b"".join((folder / f"{i}.part").read_bytes() for i in range(total))
+        full = b"".join(storage.disk_path(bucket, f"{i}.part").read_bytes() for i in range(total))
         if not full:
             return json_error(400, "Recording file is empty")
         if len(full) > VIDEO_MAX_BYTES:
@@ -279,7 +289,7 @@ async def upload_chunk(test_id: str, chunk: UploadFile = File(None), chunkIndex:
         url = test_video.admin_url(test["id"])
         _mark_video_ready(test, url)
         test_backup.snapshot(test["id"], "video")
-        shutil.rmtree(folder, ignore_errors=True)
+        storage.drop_disk(bucket)
         return {"complete": True, "success": True, "videoUrl": url, "bytes": len(full)}
     except Exception as err:
         return public_error(err, "Chunk upload failed")

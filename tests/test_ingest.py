@@ -10,7 +10,7 @@ from services import automation as au
 
 @pytest.fixture()
 def admin(client, monkeypatch, tmp_path):
-    for target in ("services.storage", "services.docs_storage", "services.structured_log"):
+    for target in ("services.storage", "services.structured_log"):
         monkeypatch.setattr(f"{target}.UPLOAD_DIR", tmp_path)
     monkeypatch.setenv("ADMIN_PASSWORD", "AdminPw1!")
     monkeypatch.setattr(llm, "complete_json", lambda *a, **k: (_ for _ in ()).throw(llm.LlmError("down")))
@@ -115,8 +115,12 @@ def test_candidate_scan_and_interviews_refresh(client, store, admin, monkeypatch
     up = client.post("/api/admin/upload_unified", headers=admin, files={"file": ("jane.pdf", b"%PDF-1.4 jane")}, data={"category": "resume"})
     assert up.status_code == 200 and up.json()["refreshResult"]["processed"] == 1
     assert store.count("resumes") == 1
+    assert docs_storage.list_files("Resumes") == []
     again = client.post("/api/admin/refresh?type=candidates", headers=admin).json()
-    assert again["duplicates"] == 1 and again["processed"] == 0
+    assert again["duplicates"] == 0 and again["processed"] == 0
+    repeat = client.post("/api/admin/upload_unified", headers=admin, files={"file": ("jane.pdf", b"%PDF-1.4 jane")}, data={"category": "resume"})
+    assert repeat.json()["refreshResult"]["duplicates"] == 1 and docs_storage.list_files("Resumes") == []
+    assert store.count("resumes") == 1
     assert client.post("/api/admin/refresh?type=interviews", headers=admin).json() == {"success": True, "count": 0}
 
 

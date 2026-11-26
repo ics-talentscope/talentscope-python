@@ -1,8 +1,10 @@
+from datetime import datetime, timezone
 import uuid
 
 import pytest
 
 from core import tenancy
+from core.tokens import sign_token
 from services import (
     admin_accounts,
     employee_portal_admin,
@@ -54,11 +56,11 @@ def _seed_employee_and_bank(store):
         })
 
 
-def _create_assessment(client, headers) -> dict:
+def _create_assessment(client, headers, name="Security Foundations") -> dict:
     # Mirrors assessmentPayload() in SlalomBootcampManager.tsx.
     response = client.post(BASE + "/assessments", headers=headers, json={
-        "name": "Security Foundations",
-        "title": "Security Foundations",
+        "name": name,
+        "title": name,
         "description": "Slalom bootcamp security assessment",
         "bankKey": "Bootcamp Bank",
         "bank_key": "Bootcamp Bank",
@@ -76,6 +78,114 @@ def _create_assessment(client, headers) -> dict:
     })
     assert response.status_code == 200, response.text
     return response.json()
+
+
+def test_bootcamp_assessments_have_independent_employee_tests_and_attempts(client, store, monkeypatch):
+    monkeypatch.setenv("SLALOM_ADMIN_PASSWORD", "SlalomBoot123!")
+    admin_accounts.invalidate_cache()
+    admin = _headers(client, "admin@slalom.com", "SlalomBoot123!")
+    _seed_employee_and_bank(store)
+    cohort = _create_cohort(client, admin)
+
+    first = _create_assessment(client, admin)
+    first_assignment = _assign_bootcamp(client, admin, first["id"], cohort["id"])["assignments"][0]
+    employee_headers = {"Authorization": f"Bearer {sign_token('BOOT1', client='slalom')}"}
+    first_started = client.patch(
+        f"/api/employee/tests/{first_assignment['testId']}",
+        headers=employee_headers,
+        json={
+            "status": "in_progress",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "camera_granted": True,
+        },
+    )
+    assert first_started.status_code == 200, first_started.text
+    with tenancy.client_context("slalom"):
+        first_questions = store.select(
+            "test_questions", {"test_id": first_assignment["testId"]},
+            ["id", "correct_option_index"],
+        )
+    submitted = client.post(
+        f"/api/employee/tests/{first_assignment['testId']}/submit",
+        headers=employee_headers,
+        json={"answers": [
+            {"question_id": question["id"], "selected_index": question["correct_option_index"]}
+            for question in first_questions
+        ]},
+    )
+    assert submitted.status_code == 200, submitted.text
+
+    second = _create_assessment(client, admin, "Cloud Foundations")
+    second_assignment = _assign_bootcamp(client, admin, second["id"], cohort["id"])["assignments"][0]
+    assert second_assignment["testId"] != first_assignment["testId"]
+    with tenancy.client_context("slalom"):
+        first_test = store.first("tests", {"id": first_assignment["testId"]})
+        second_test = store.first("tests", {"id": second_assignment["testId"]})
+        assert first_test["topic_id"] != second_test["topic_id"]
+
+    second_started = client.patch(
+        f"/api/employee/tests/{second_assignment['testId']}",
+        headers=employee_headers,
+        json={
+            "status": "in_progress",
+            "started_at": datetime.now(timezone.utc).isoformat(),
+            "camera_granted": True,
+        },
+    )
+    assert second_started.status_code == 200, second_started.text
+    active = client.get("/api/employee/assigned-test", headers=employee_headers)
+    assert active.json()["active_test"]["test_id"] == second_assignment["testId"]
+
+
+def test_bootcamp_resource_deletes_preserve_delivery_tests(client, store, monkeypatch):
+    monkeypatch.setenv("SLALOM_ADMIN_PASSWORD", "SlalomBoot123!")
+    admin_accounts.invalidate_cache()
+    admin = _headers(client, "admin@slalom.com", "SlalomBoot123!")
+    _seed_employee_and_bank(store)
+    assessment = _create_assessment(client, admin)
+    cohort = _create_cohort(client, admin)
+    assignment = _assign_bootcamp(client, admin, assessment["id"], cohort["id"])["assignments"][0]
+
+    read_assessment = client.get(BASE + f"/assessments/{assessment['id']}", headers=admin)
+    assert read_assessment.status_code == 200
+    patched_assessment = client.patch(
+        BASE + f"/assessments/{assessment['id']}",
+        headers=admin,
+        json={"description": "Updated bootcamp assessment"},
+    )
+    assert patched_assessment.status_code == 200
+    assert patched_assessment.json()["description"] == "Updated bootcamp assessment"
+    read_cohort = client.get(BASE + f"/cohorts/{cohort['id']}", headers=admin)
+    assert read_cohort.status_code == 200
+    patched_cohort = client.patch(
+        BASE + f"/cohorts/{cohort['id']}",
+        headers=admin,
+        json={"description": "Updated bootcamp cohort"},
+    )
+    assert patched_cohort.status_code == 200
+    assert patched_cohort.json()["description"] == "Updated bootcamp cohort"
+
+    second_assessment = _create_assessment(client, admin, "Second Security Assessment")
+    second_assignment = _assign_bootcamp(
+        client, admin, second_assessment["id"], cohort["id"],
+    )["assignments"][0]
+
+    deleted_assessment = client.delete(
+        BASE + f"/assessments/{assessment['id']}", headers=admin,
+    )
+    assert deleted_assessment.status_code == 200, deleted_assessment.text
+    with tenancy.client_context("slalom"):
+        assert store.first("bootcamp_assessments", {"id": assessment["id"]}) is None
+        assert store.count("bootcamp_assignments", {"assessment_id": assessment["id"]}) == 0
+        assert store.first("tests", {"id": assignment["testId"]}) is not None
+
+    deleted_cohort = client.delete(BASE + f"/cohorts/{cohort['id']}", headers=admin)
+    assert deleted_cohort.status_code == 200, deleted_cohort.text
+    with tenancy.client_context("slalom"):
+        assert store.first("bootcamp_cohorts", {"id": cohort["id"]}) is None
+        assert store.count("bootcamp_cohort_members", {"cohort_id": cohort["id"]}) == 0
+        assert store.count("bootcamp_assignments", {"cohort_id": cohort["id"]}) == 0
+        assert store.first("tests", {"id": second_assignment["testId"]}) is not None
 
 
 def _create_cohort(client, headers, name="Cohort A") -> dict:
@@ -166,7 +276,7 @@ def test_slalom_assignment_uses_assessment_overrides_in_delivery_tables(client, 
     with tenancy.client_context("slalom"):
         test = store.first("tests", {"id": assignment["testId"]})
         questions = store.select("test_questions", {"test_id": assignment["testId"]})
-        assert test["topic_id"] == "resource-product-assessment"
+        assert test["topic_id"] == f"resource-product-assessment:{assessment['id']}"
         assert test["topic_title"] == "Security Foundations"
         assert test["subject_title"] == "Bootcamp Assessment"
         assert test["total_questions"] == 3
@@ -239,6 +349,14 @@ def test_slalom_content_overrides_are_tenant_scoped(client, store, monkeypatch):
         )["explanation"]
         ai_subject = next(item for item in portal.portal_catalog() if item["id"] == "ai")
         assert ai_subject["title"] == "Artificial Intelligence"
+
+    deleted = client.delete(
+        BASE + f"/content?id={source.json()['id']}", headers=slalom_admin,
+    )
+    assert deleted.status_code == 200 and deleted.json()["deleted"] is True
+    assert all(item["id"] != source.json()["id"] for item in client.get(
+        BASE + "/content", headers=slalom_admin,
+    ).json()["content"])
 
 
 def test_slalom_leaderboard_is_read_only_and_uses_three_strike_auto_submit(
@@ -384,3 +502,62 @@ def test_difficulty_mix_cannot_exceed_question_count(client, monkeypatch):
     })
     assert response.status_code == 400, response.text
     assert "cannot exceed the question count" in response.text
+
+
+def test_cohort_flow_creates_accounts_under_the_cohort_and_auto_assigns(client, store, monkeypatch):
+    monkeypatch.setenv("SLALOM_ADMIN_PASSWORD", "SlalomBoot123!")
+    admin_accounts.invalidate_cache()
+    admin = _headers(client, "admin@slalom.com", "SlalomBoot123!")
+    _seed_employee_and_bank(store)
+    assessment = _create_assessment(client, admin)
+    cohort = _create_cohort(client, admin, "Wave 1")
+
+    empty = client.get(BASE + f"/cohorts/{cohort['id']}/overview", headers=admin).json()
+    assert empty["stage"] == "learners" and empty["summary"]["learners"] == 0
+
+    first = client.post(BASE + f"/cohorts/{cohort['id']}/learners", headers=admin, json={"learners": [
+        {"employeeId": "NEW1", "name": "Asha Rao", "email": "asha@example.com", "role": "Analyst"},
+        {"employeeId": "NEW2", "name": "Ben Lee", "email": "not-an-email"},
+        {"employeeId": "new1", "name": "Dup", "email": "dup@example.com"},
+    ]})
+    assert first.status_code == 200, first.text
+    body = first.json()
+    assert [item["employeeId"] for item in body["enrolled"]] == ["NEW1"]
+    assert body["enrolled"][0]["created"] is True and body["enrolled"][0]["firstLoginPassword"] == "NEW1"
+    assert {item["row"] for item in body["failed"]} == {2, 3}
+
+    with tenancy.client_context("slalom"):
+        assert store.first("employees", {"employee_id": "NEW1"}) is not None
+        assert store.count("bootcamp_cohort_members", {"cohort_id": cohort["id"]}) == 1
+
+    staged = client.get(BASE + f"/cohorts/{cohort['id']}/overview", headers=admin).json()
+    assert staged["stage"] == "assessments" and staged["summary"]["learners"] == 1
+
+    assigned = client.post(BASE + f"/assessments/{assessment['id']}/assign", headers=admin, json={"cohortId": cohort["id"]})
+    assert assigned.status_code == 200 and assigned.json()["assigned"] == 1
+
+    late = client.post(BASE + f"/cohorts/{cohort['id']}/learners", headers=admin, json={"learners": [
+        {"employeeId": "LATE1", "name": "Chen Wu", "email": "chen@example.com"},
+    ]}).json()
+    assert late["enrolled"][0]["assigned"] == 1
+
+    overview = client.get(BASE + f"/cohorts/{cohort['id']}/overview", headers=admin).json()
+    assert overview["stage"] == "progress"
+    assert overview["summary"]["learners"] == 2 and overview["summary"]["assigned"] == 2
+    assert {row["employeeId"]: row["assigned"] for row in overview["learners"]} == {"NEW1": 1, "LATE1": 1}
+    assert overview["assessments"][0]["name"] == "Security Foundations"
+
+
+def test_cohort_learner_upload_creates_accounts(client, store, monkeypatch):
+    monkeypatch.setenv("SLALOM_ADMIN_PASSWORD", "SlalomBoot123!")
+    admin_accounts.invalidate_cache()
+    admin = _headers(client, "admin@slalom.com", "SlalomBoot123!")
+    cohort = _create_cohort(client, admin, "Upload cohort")
+    csv_bytes = b"Emp ID,Name,Email,Role\nUP1,Dana Fox,dana@example.com,Engineer\nUP2,Eli Roe,eli@example.com,Analyst\n"
+    response = client.post(BASE + f"/cohorts/{cohort['id']}/learners/upload", headers=admin,
+                           files={"file": ("roster.csv", csv_bytes, "text/csv")})
+    assert response.status_code == 200, response.text
+    assert response.json()["created"] == 2 and response.json()["failed"] == []
+    bad = client.post(BASE + f"/cohorts/{cohort['id']}/learners/upload", headers=admin,
+                      files={"file": ("roster.txt", b"x", "text/plain")})
+    assert bad.status_code == 400

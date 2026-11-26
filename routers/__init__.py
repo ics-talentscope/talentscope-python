@@ -1,6 +1,7 @@
 from routers import (
     admin_access,
     admin_auth,
+    admin_document_questions,
     admin_employee_tests,
     admin_employee_portal,
     admin_employees,
@@ -28,6 +29,7 @@ ROUTERS = [
     admin_monitor.router,
     admin_question_bank.router,
     admin_jd.router,
+    admin_document_questions.router,
     admin_employee_tests.router,
     admin_employee_portal.router,
     admin_slalom_bootcamp.router,

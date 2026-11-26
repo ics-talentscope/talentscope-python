@@ -29,7 +29,7 @@ def _console_filter(record: dict) -> bool:
 
 def _environment_log_directory(directory: Path, environment: str) -> Path:
     folder = "prod" if environment.strip().lower() in {"prod", "production"} else "dev"
-    return directory / folder
+    return directory if directory.name == folder else directory / folder
 
 
 def archive_completed_months(directory: Path, today: date | None = None) -> list[Path]:

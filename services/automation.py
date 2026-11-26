@@ -579,7 +579,6 @@ def refresh_requirements(incoming_br: Optional[list[tuple[str, bytes]]] = None, 
     actor = (actor_email or "").strip().lower()
     br_incoming = {n.lower(): d for n, d in incoming_br or []}
     jd_incoming = {n.lower(): d for n, d in incoming_jd or []}
-    deleted = deleted_req.load()
     now = _now()
     existing = {str(r["id"]).lower(): r for r in store.select("job_descriptions")}
     br_files = {f.lower(): f for f in docs_storage.list_files("BR") if re.search(r"\.(xlsx|xls)$", f, re.I)}
@@ -676,9 +675,11 @@ def refresh_candidates(active_jd_id: Optional[str] = None) -> dict:
                 report = prior.get("report")
                 report = __import__("json").loads(report) if isinstance(report, str) and report else (report or {})
                 if report.get("jdId") == jd_id:
+                    docs_storage.delete_file("Resumes", file)
                     duplicates += 1
                     continue
             result = resumes.process_resume(file, data, jd_text, jd_id, admin_accounts.default_admin_email(), False, wait=True)
+            docs_storage.delete_file("Resumes", file)
             processed += 1
             score = (result.get("report") or {}).get("jdMatchScore") or (result.get("analysis") or {}).get("overallScore") or 0
             name = (result.get("parsed") or {}).get("personal", {}).get("fullName") or re.sub(r"\.[^/.]+$", "", file)

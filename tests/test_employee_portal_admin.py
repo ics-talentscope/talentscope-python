@@ -369,6 +369,15 @@ def test_bulk_delete_portal_users_removes_accounts_and_linked_data(client, store
         "id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "test_id": test_id,
         "employee_id": employee_uuid, "question_id": question_id, "is_correct": True,
     })
+    store.insert("assessment_attempts", {
+        "id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+        "employee_id": "PORTAL_DELETE",
+        "employee_uuid": employee_uuid,
+        "topic_id": "resource-product-assessment",
+        "test_id": test_id,
+        "attempt_number": 1,
+        "status": "in_progress",
+    })
     deleted_videos = []
     deleted_backups = []
     monkeypatch.setattr(employee_portal_admin.test_video, "delete", deleted_videos.append)
@@ -392,6 +401,7 @@ def test_bulk_delete_portal_users_removes_accounts_and_linked_data(client, store
     assert store.count("tests", {"id": test_id}) == 0
     assert store.count("test_questions", {"test_id": test_id}) == 0
     assert store.count("test_attempts", {"test_id": test_id}) == 0
+    assert store.count("assessment_attempts", {"test_id": test_id}) == 0
 
 
 def test_employee_portal_edit_and_password_reset_notify_user(client, store, monkeypatch):

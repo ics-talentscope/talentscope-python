@@ -34,7 +34,7 @@ archive layout.
 
 ### Azure VM uploads and recordings
 
-The VM deployment workflows mount `/opt/recordings/dev` for development and `/opt/recording/prod` for production at `/app/uploads`; production and development therefore keep separate persistent data outside the application checkout and Docker image. Employee-test videos remain in the `employee_test_recordings/` subfolder and retain their `<test-id>.webm` names, which the API uses to associate each video with its database test/employee record.
+The VM deployment workflows mount `/opt/recordings/dev` for development and `/opt/recordings/prod` for production at `/app/uploads`; production and development therefore keep separate persistent data outside the application checkout and Docker image. Files are stored flat in that directory with descriptive prefixes (`interview-recording-<id>.webm`, `test-recording-<test-id>.webm`, `verification-<id>_id.jpg`, `resume-<id>-<name>`, `backup-<test-id>-latest.json`/`-submit.json`, `doc-<category>-<name>`); other clients are prefixed with their name. To convert an existing nested directory run `python scripts/migrate_storage_layout.py --recordings <dir> --logs <logs-dir>` (dry run) and add `--apply`.
 
 Before recreating the API container, deployment copies the existing `/app/uploads` contents from its current Docker volume into the matching environment directory. This is a copy, not a destructive move: the old volume is retained as a recovery copy, and subsequent builds/redeployments do not sync or delete files from either recordings directory. Verify the recordings in the application before manually removing any old Docker volume.
 

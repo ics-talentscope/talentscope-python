@@ -318,10 +318,11 @@ def _resolve_test_id(test_id: str, employee_id: str) -> str:
     if not employee_id:
         return ""
     store = get_store()
+    row = store.first("tests", {"employee_code": employee_id, "topic_id": pr.PRODUCT_TOPIC}, ["id"])
+    if row:
+        return row["id"]
     emp = store.first("employees", {"employee_id": employee_id}, ["id"])
-    if not emp:
-        return ""
-    row = store.first("tests", {"employee_id": emp["id"], "topic_id": pr.PRODUCT_TOPIC}, ["id"])
+    row = store.first("tests", {"employee_id": emp["id"], "topic_id": pr.PRODUCT_TOPIC}, ["id"]) if emp else None
     return row["id"] if row else ""
 
 
@@ -339,14 +340,12 @@ def reset_test(body: dict = Body(default_factory=dict)):
         if not resolved:
             return json_error(404, "Assigned test not found for this employee")
         preserved = len(et.questions_for(resolved))
-        test_video.delete(resolved)
         et.reset_test(resolved)
         if employee_id:
             try:
                 get_store().update("employees", {"ai_readiness_score": 0, "xp_points": 0, "skill_level": "beginner"}, {"employee_id": employee_id})
             except Exception as err:
                 log.warning("Failed to reset employee counters: %s", err)
-        test_video.delete(resolved)
         write_log("employee", "ADMIN_RESET_EMPLOYEE_TEST", "success",
                   f"Admin reset test {resolved}{f' for employee {employee_id}' if employee_id else ''} (questions preserved: {preserved})")
         return {"success": True, "testId": resolved, "preservedQuestions": preserved}

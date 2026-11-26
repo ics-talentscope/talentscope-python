@@ -142,10 +142,10 @@ def download(resume_id: str):
     rid = as_uuid(resume_id)
     if not rid:
         return json_error(400, "Invalid resume id")
-    stored = next((f for f in storage.bucket_dir("resumes").iterdir() if f.is_file() and f.name.startswith(f"{rid}-")), None)
-    data = storage.read("resumes", stored.name) if stored else None
+    stored = next((n for n in storage.names("resumes") if n.startswith(f"{rid}-")), None)
+    data = storage.read("resumes", stored) if stored else None
     if stored and data:
-        name = stored.name[len(rid) + 1:]
+        name = stored[len(rid) + 1:]
     else:
         row = get_store().first("resumes", {"id": rid}, ["filename", "file_base64"])
         if not row or not row.get("file_base64"):

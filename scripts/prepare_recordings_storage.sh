@@ -18,8 +18,8 @@ case "$environment" in
     marker="/opt/recordings/.dev-uploads-migrated"
     ;;
   prod)
-    target="/opt/recording/prod"
-    marker="/opt/recording/.prod-uploads-migrated"
+    target="/opt/recordings/prod"
+    marker="/opt/recordings/.prod-uploads-migrated"
     ;;
 esac
 sudo install -d -m 0750 "$target"
@@ -42,8 +42,8 @@ else
     :
   else
     legacy_directory=""
-    if [[ "$environment" == "prod" && -d /opt/recordings/prod ]]; then
-      legacy_directory=/opt/recordings/prod
+    if [[ "$environment" == "prod" && -d /opt/recording/prod ]]; then
+      legacy_directory=/opt/recording/prod
     fi
     if [[ -n "$legacy_directory" ]]; then
       source="$legacy_directory"

@@ -35,6 +35,7 @@ COPY .env.example /app/.env.local
 RUN mkdir -p /app/uploads
 
 ENV PYTHONUNBUFFERED=1
+ENV UPLOAD_DIR=/app/uploads
 
 EXPOSE 8000
 

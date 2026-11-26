@@ -69,7 +69,13 @@ def update_interview_defaults(request: Request, body: dict = Body(default_factor
 
 @router.get("/sync")
 def sync():
-    return read_sync()
+    state = read_sync()
+    try:
+        state["activeTests"] = get_store().count("tests", {"status": "in_progress"})
+    except Exception as err:
+        log.warning("Active test count failed: %s", err)
+        state["activeTests"] = 0
+    return state
 
 
 def _display_log(entry: dict) -> dict:

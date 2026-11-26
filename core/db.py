@@ -16,7 +16,7 @@ from core import request_context, tenancy
 JSON_COLUMNS = {
     "employees": {"badges"},
     "tests": {"in_progress", "proctoring", "ai_analysis"},
-    "test_questions": {"options"},
+    "test_questions": {"options", "correct_answers"},
     "employee_portal_question_bank": {"options"},
     "portal_settings": {"value"},
     "evaluations": {"bloom_scores", "bloom_submissions", "bloom_graded"},
@@ -35,7 +35,7 @@ POSTGRES_JSON_COLUMNS = {
     "employee_portal_question_bank": {"options"},
     "audit_logs": {"details"},
     "candidate_interview_data": {"evaluation"},
-    "test_questions": {"options"},
+    "test_questions": {"options", "correct_answers"},
     "evaluations": {"bloom_scores", "bloom_submissions", "bloom_graded"},
     "question_sets": {"items"},
     "system_logs": {"request_payload", "response_payload"},
@@ -61,7 +61,7 @@ TENANT_TABLES = {
     "business_impacts", "system_logs", "storage_objects", "question_sets", "interview_question_bank",
     "employee_portal_question_bank", "employee_auth_otps",
     "bootcamp_assessments", "bootcamp_cohorts", "bootcamp_cohort_members",
-    "bootcamp_assignments", "bootcamp_content",
+    "bootcamp_assignments", "bootcamp_content", "assessment_attempts",
 }
 
 Where = Union[None, dict, list]

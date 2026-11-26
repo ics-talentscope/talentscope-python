@@ -23,8 +23,8 @@ APP_DIR="${APP_DIR:-$DEPLOY_ROOT/python}"
 ENV_FILE="${ENV_FILE:-$DEPLOY_ROOT/.env.local}"
 COMPOSE_FILE="${COMPOSE_FILE:-$DEPLOY_ROOT/docker-compose.azure.yml}"
 RECORDINGS_ENV=prod
-RECORDINGS_PATH=/opt/recording/prod
-LOG_HOST_DIR=/opt/logs/prod
+RECORDINGS_PATH=/opt/recordings/prod
+LOG_HOST_DIR=/opt/logs
 API_COMPOSE_FILE="$APP_DIR/compose.api.yml"
 API_SECURITY_COMPOSE_FILE="$APP_DIR/compose.api.security.yml"
 COMPOSE_OVERRIDE="$APP_DIR/compose.recordings.yml"
@@ -50,7 +50,8 @@ fi
 DB_MIGRATION_COUNT="$(find "$SRC/db" -type f -name '*.sql' | wc -l)"
 [[ "$DB_MIGRATION_COUNT" -gt 0 ]] || { echo "No SQL database migrations found in $SRC/db." >&2; exit 1; }
 
-sudo install -d -m 0750 "$LOG_HOST_DIR"
+sudo install -d -m 0755 "$LOG_HOST_DIR"
+sudo install -d -m 0750 "$LOG_HOST_DIR/prod"
 LOG_COMPOSE_DIR="$(mktemp -d)"
 LOG_COMPOSE_FILE="$LOG_COMPOSE_DIR/docker-compose.logging.yml"
 trap 'rm -f "$LOG_COMPOSE_FILE"; rmdir "$LOG_COMPOSE_DIR"' EXIT

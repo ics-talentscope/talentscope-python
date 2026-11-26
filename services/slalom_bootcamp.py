@@ -343,7 +343,9 @@ def save_assessment(body: dict, actor: str = "") -> dict:
 def delete_assessment(assessment_id: str) -> bool:
     ensure_slalom_context()
     get_assessment(assessment_id)
-    return bool(get_store().delete(ASSESSMENTS, {"id": assessment_id}))
+    store = get_store()
+    store.delete(ASSIGNMENTS, {"assessment_id": assessment_id})
+    return bool(store.delete(ASSESSMENTS, {"id": assessment_id}))
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +395,7 @@ def delete_cohort(cohort_id: str) -> bool:
     ensure_slalom_context()
     get_cohort(cohort_id)
     store = get_store()
+    store.delete(ASSIGNMENTS, {"cohort_id": cohort_id})
     store.delete(MEMBERS, {"cohort_id": cohort_id})
     return bool(store.delete(COHORTS, {"id": cohort_id}))
 
@@ -473,6 +476,114 @@ def add_members(cohort_id: str, employees: list, actor: str = "") -> list[dict]:
     return out
 
 
+def _learner_details(item) -> dict:
+    if not isinstance(item, dict):
+        raise ValueError("Each learner needs an Employee ID, name and email.")
+    return {
+        "employee_id": str(_first(item, "employeeId", "employee_id", "id", default="") or "").strip(),
+        "full_name": " ".join(str(_first(item, "fullName", "full_name", "name", default="") or "").split()),
+        "email": str(_first(item, "email", default="") or "").strip().lower(),
+        "designation": str(_first(item, "designation", "role", default="") or "").strip(),
+        "department": str(_first(item, "department", default="") or "").strip(),
+    }
+
+
+def cohort_assessment_ids(cohort_id: str) -> list[str]:
+    rows = get_store().select(ASSIGNMENTS, {"cohort_id": cohort_id}, ["assessment_id"])
+    return list(dict.fromkeys(row["assessment_id"] for row in rows if row.get("assessment_id")))
+
+
+def enroll_learners(cohort_id: str, learners: list, actor: str = "", auto_assign: bool = True) -> dict:
+    """Create employee portal accounts inside a cohort and enrol them in one step.
+
+    Assessments already assigned to the cohort are assigned to each new learner,
+    so a cohort behaves the same for late joiners as for the first intake.
+    """
+    ensure_slalom_context()
+    get_cohort(cohort_id)
+    if not isinstance(learners, list) or not learners:
+        raise ValueError("Add at least one learner.")
+    if len(learners) > 500:
+        raise ValueError("Add no more than 500 learners at a time.")
+    from services import employee_portal_admin as portal_admin
+
+    assessment_ids = cohort_assessment_ids(cohort_id) if auto_assign else []
+    enrolled, failed, seen = [], [], set()
+    for row, item in enumerate(learners, start=1):
+        label = ""
+        try:
+            details = _learner_details(item)
+            label = details["employee_id"]
+            key = label.casefold()
+            if key in seen:
+                raise ValueError("Duplicate Employee ID in this batch.")
+            seen.add(key)
+            result = portal_admin.provision_employee(details)
+            employee_id = result["employeeId"]
+            add_members(cohort_id, [{"employeeId": employee_id, "email": result["email"], "name": result["name"]}], actor)
+            assigned = 0
+            for assessment_id in assessment_ids:
+                assigned += len(assign_assessment(assessment_id, [employee_id], cohort_id, actor))
+            enrolled.append({
+                "employeeId": employee_id, "name": result["name"], "email": result["email"],
+                "created": bool(result.get("created")), "firstLoginPassword": result.get("firstLoginPassword"),
+                "assigned": assigned,
+            })
+        except (ValueError, LookupError, RuntimeError) as err:
+            failed.append({"row": row, "employeeId": label, "error": str(err)})
+    return {
+        "enrolled": enrolled, "failed": failed,
+        "created": sum(1 for item in enrolled if item["created"]), "existing": sum(1 for item in enrolled if not item["created"]),
+    }
+
+
+def _progress_row(assignments: list[dict], tests: dict) -> dict:
+    mine = [tests[a["testId"]] for a in assignments if a.get("testId") in tests]
+    done = [t for t in mine if t.get("status") == "completed"]
+    scores = [float(t["score_percent"]) for t in done if t.get("score_percent") is not None]
+    return {
+        "assigned": len(assignments),
+        "started": sum(1 for t in mine if t.get("status") in ("in_progress", "completed")),
+        "completed": len(done),
+        "averageScore": round(sum(scores) / len(scores), 1) if scores else None,
+    }
+
+
+def cohort_overview(cohort_id: str) -> dict:
+    """One read model for the cohort workspace: stage, learners, assessments and progress."""
+    ensure_slalom_context()
+    cohort = map_cohort(get_cohort(cohort_id))
+    store = get_store()
+    members = list_members(cohort_id)
+    assignments = list_assignments(cohort_id=cohort_id)
+    test_ids = [a["testId"] for a in assignments if a.get("testId")]
+    tests = {t["id"]: t for t in store.select("tests", {"id": test_ids}, TEST_COLUMNS)} if test_ids else {}
+    names = {a["id"]: a for a in list_assessments()}
+
+    learners = []
+    for member in members:
+        mine = [a for a in assignments if a["employeeId"] == member["employeeId"]]
+        learners.append({**member, **_progress_row(mine, tests)})
+    assessments = []
+    for assessment_id in dict.fromkeys(a["assessmentId"] for a in assignments if a.get("assessmentId")):
+        mine = [a for a in assignments if a["assessmentId"] == assessment_id]
+        info = names.get(assessment_id) or {}
+        assessments.append({
+            "assessmentId": assessment_id, "name": info.get("name") or info.get("title") or "Assessment",
+            "status": info.get("status") or "closed", **_progress_row(mine, tests),
+        })
+    summary = _progress_row(assignments, tests)
+    summary.update({"learners": len(members), "assessments": len(assessments)})
+    steps = [
+        {"key": "cohort", "done": True},
+        {"key": "learners", "done": bool(members)},
+        {"key": "assessments", "done": bool(assessments)},
+        {"key": "progress", "done": summary["completed"] > 0},
+    ]
+    stage = next((step["key"] for step in steps if not step["done"]), "progress")
+    return {"cohort": cohort, "stage": stage, "steps": steps, "summary": summary, "learners": learners, "assessments": assessments}
+
+
 def remove_member(cohort_id: str, employee_id: str) -> bool:
     ensure_slalom_context()
     return bool(get_store().delete(MEMBERS, {"cohort_id": cohort_id, "employee_id": employee_id}))
@@ -521,7 +632,11 @@ def assign_assessment(assessment_id: str, employees: list, cohort_id: str = "", 
     for item in employees:
         details = _provision_details(item)
         details["assessmentId"] = assessment["id"]
-        result = portal_admin.provision_employee(details, assessment=assessment)
+        delivery_assessment = {
+            **assessment,
+            "topic_id": f"{accounts.PRODUCT_ASSESSMENT_TOPIC_ID}:{assessment['id']}",
+        }
+        result = portal_admin.provision_employee(details, assessment=delivery_assessment)
         resolved_id = result["employeeId"]
         where = {"assessment_id": assessment["id"], "employee_id": resolved_id}
         existing = store.first(ASSIGNMENTS, where)

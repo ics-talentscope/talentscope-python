@@ -6,7 +6,6 @@ import logging
 import re
 import threading
 import uuid
-import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import Any, Optional

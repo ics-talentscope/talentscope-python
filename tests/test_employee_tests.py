@@ -214,3 +214,27 @@ def test_question_bank_shape():
     assert len(bank) == 100
     for q in bank:
         assert len(q["options"]) == 4 and 0 <= q["correctIndex"] < 4
+
+
+def test_reset_keeps_flag_and_answer_history_but_drops_video(client, world, store, monkeypatch):
+    from services import storage, test_video
+
+    monkeypatch.setattr(storage, "_sql_ok", lambda: False)
+    store.update("tests", {
+        "status": "in_progress", "session_recording_url": "x",
+        "proctoring": {"warningCount": 2, "violations": [{"type": "Tab Switch"}], "videoUploaded": True},
+    }, {"id": TEST_ID})
+    store.seed("test_attempts", [{"id": "a1", "test_id": TEST_ID, "employee_id": EMP_UUID, "question_id": Q[0], "selected_option_index": 1, "is_correct": True}])
+    webm = bytes([0x1A, 0x45, 0xDF, 0xA3]) + b"\x00" * 600 + bytes([0x1F, 0x43, 0xB6, 0x75]) + b"\x00" * 4096
+    assert test_video.save(TEST_ID, webm) and test_video.exists(TEST_ID)
+
+    et.reset_test(TEST_ID)
+
+    history = [t for t in store.select("tests") if str(t.get("topic_id", "")).startswith("resource-product-assessment-history:")]
+    assert len(history) == 1
+    assert history[0]["proctoring"]["warningCount"] == 2 and history[0]["proctoring"]["violations"][0]["type"] == "Tab Switch"
+    assert history[0]["session_recording_url"] is None
+    assert len(store.select("test_attempts", {"test_id": history[0]["id"]})) == 1
+    assert store.select("test_attempts", {"test_id": TEST_ID}) == []
+    assert test_video.exists(TEST_ID) is False
+    assert test_video.save(TEST_ID, webm + b"new") and test_video.exists(TEST_ID)

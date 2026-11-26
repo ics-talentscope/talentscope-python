@@ -14,6 +14,21 @@ log = logging.getLogger("talentscope")
 SAFE_RE = re.compile(r'[\\/:*?"<>|]+')
 _sql_ready: Optional[bool] = None
 
+BUCKET_PREFIX = {
+    "recordings": "interview-recording",
+    "verifications": "verification",
+    "resumes": "resume",
+    "backups": "backup",
+    "employee_test_recordings": "test-recording",
+    "monitor": "monitor",
+    "video_upload_chunks": "video-upload-chunks",
+    "docs/BR": "doc-br",
+    "docs/JD": "doc-jd",
+    "docs/Resumes": "doc-resume",
+    "docs/Corp Pool": "doc-corp-pool",
+    "docs/Portal Mapping": "doc-portal-mapping",
+}
+
 MIME = {
     "pdf": "application/pdf",
     "doc": "application/msword",
@@ -151,7 +166,7 @@ def _hydrate(bucket: str, name: str, target: Path) -> None:
     target.write_bytes(data)
 
 
-def _sync_names(bucket: str, folder: Path) -> None:
+def _sync_names(bucket: str) -> None:
     if not _sql_ok():
         return
     try:
@@ -166,32 +181,74 @@ def _sync_names(bucket: str, folder: Path) -> None:
         return
     for row in rows:
         name = safe_name(str(row.get("path") or ""))
-        if not name:
-            continue
-        target = folder / name
-        if folder.resolve() not in target.resolve().parents:
-            continue
-        if not target.exists():
-            target.touch()
+        if name:
+            target = disk_path(bucket, name)
+            if not target.exists():
+                target.touch()
 
 
-def bucket_dir(bucket: str, create: bool = True) -> Path:
-    path = tenancy.client_root(UPLOAD_DIR).joinpath(*bucket.split("/"))
+def root(create: bool = True) -> Path:
+    path = Path(UPLOAD_DIR)
     if create:
         path.mkdir(parents=True, exist_ok=True)
-        _sync_names(bucket, path)
     return path
 
 
+def _client_head() -> str:
+    client = tenancy.current_client()
+    return "" if client == tenancy.DEFAULT_CLIENT else f"{client}-"
+
+
+def prefix(bucket: str) -> str:
+    base = BUCKET_PREFIX.get(bucket) or re.sub(r"[^a-z0-9]+", "-", bucket.lower()).strip("-") or "files"
+    return f"{_client_head()}{base}-"
+
+
+def disk_path(bucket: str, name: str) -> Path:
+    return root() / f"{prefix(bucket)}{safe_name(name)}"
+
+
+def disk_names(bucket: str) -> list[str]:
+    folder = root(create=False)
+    head = prefix(bucket)
+    if not folder.is_dir():
+        return []
+    return sorted(p.name[len(head):] for p in folder.iterdir() if p.is_file() and p.name.startswith(head))
+
+
+def names(bucket: str) -> list[str]:
+    _sync_names(bucket)
+    return disk_names(bucket)
+
+
+def drop_disk(bucket: str) -> None:
+    for name in disk_names(bucket):
+        disk_path(bucket, name).unlink(missing_ok=True)
+
+
+def drop_stale(bucket_root: str, hours: int) -> int:
+    folder = root(create=False)
+    if not folder.is_dir():
+        return 0
+    head = prefix(bucket_root)
+    cutoff = time.time() - hours * 3600
+    removed = 0
+    for path in folder.iterdir():
+        if path.is_file() and path.name.startswith(head) and path.stat().st_mtime < cutoff:
+            path.unlink(missing_ok=True)
+            removed += 1
+    return removed
+
+
 def save(bucket: str, name: str, data: bytes) -> str:
-    target = bucket_dir(bucket) / safe_name(name)
+    target = disk_path(bucket, name)
     target.write_bytes(data)
-    _sql_put(bucket, target.name, data)
-    return target.name
+    _sql_put(bucket, safe_name(name), data)
+    return safe_name(name)
 
 
 def save_stream(bucket: str, name: str, source, max_bytes: int, signature: bytes = b"", chunk: int = 1024 * 1024) -> int:
-    target = bucket_dir(bucket) / safe_name(name)
+    target = disk_path(bucket, name)
     fd, tmp = tempfile.mkstemp(dir=target.parent, suffix=".part")
     size = 0
     try:
@@ -209,7 +266,7 @@ def save_stream(bucket: str, name: str, source, max_bytes: int, signature: bytes
         if size == 0:
             raise ValueError("File is empty")
         os.replace(tmp, target)
-        _sql_put(bucket, target.name, target.read_bytes())
+        _sql_put(bucket, safe_name(name), target.read_bytes())
         return size
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
@@ -217,10 +274,9 @@ def save_stream(bucket: str, name: str, source, max_bytes: int, signature: bytes
 
 
 def resolve(bucket: str, name: str) -> Optional[Path]:
-    folder = bucket_dir(bucket, create=False)
     stored = safe_name(name)
-    target = (folder / stored).resolve()
-    if folder.resolve() not in target.parents:
+    target = (root(create=False) / f"{prefix(bucket)}{stored}").resolve()
+    if root(create=False).resolve() not in target.parents:
         return None
     _hydrate(bucket, stored, target)
     if not target.is_file() or target.stat().st_size == 0:
@@ -233,27 +289,25 @@ def read(bucket: str, name: str) -> Optional[bytes]:
     return target.read_bytes() if target else None
 
 
-def remove_prefix(bucket: str, prefix: str) -> int:
+def remove_prefix(bucket: str, name_prefix: str) -> int:
     count = 0
-    for item in bucket_dir(bucket).iterdir():
-        if item.name.startswith(prefix):
-            item.unlink(missing_ok=True)
+    for name in names(bucket):
+        if name.startswith(name_prefix):
+            disk_path(bucket, name).unlink(missing_ok=True)
             count += 1
-    sql_count = _sql_delete(bucket, prefix=prefix)
+    sql_count = _sql_delete(bucket, prefix=name_prefix)
     return sql_count or count
 
 
 def remove(bucket: str, name: str) -> None:
-    target = bucket_dir(bucket) / safe_name(name)
+    target = disk_path(bucket, name)
     if target.is_file():
         target.unlink(missing_ok=True)
     _sql_delete(bucket, path=safe_name(name))
 
 
 def clear_bucket(bucket: str) -> None:
-    for item in bucket_dir(bucket).iterdir():
-        if item.is_file():
-            item.unlink(missing_ok=True)
+    drop_disk(bucket)
     _sql_delete(bucket)
 
 
@@ -261,9 +315,9 @@ def prune_older_than(bucket: str, days: int) -> int:
     if days <= 0:
         return 0
     cutoff = time.time() - days * 86400
-    folder = bucket_dir(bucket)
     removed = 0
-    for path in folder.iterdir():
+    for name in names(bucket):
+        path = disk_path(bucket, name)
         if path.is_file() and path.stat().st_mtime < cutoff:
             path.unlink(missing_ok=True)
             removed += 1
@@ -281,8 +335,22 @@ def prune_older_than(bucket: str, days: int) -> int:
         log.warning("SQL file prune list failed for %s: %s", bucket, err)
         rows = []
     for row in rows:
-        (folder / safe_name(str(row.get("path") or ""))).unlink(missing_ok=True)
+        disk_path(bucket, str(row.get("path") or "")).unlink(missing_ok=True)
     return _sql_delete(bucket, older_than_days=days) or removed
+
+
+def _bucket_of(file_name: str) -> Optional[str]:
+    head = _client_head()
+    others = [f"{c}-" for c in tenancy.CLIENTS if c != tenancy.DEFAULT_CLIENT]
+    if head and not file_name.startswith(head):
+        return None
+    if not head and any(file_name.startswith(other) for other in others):
+        return None
+    rest = file_name[len(head):]
+    for bucket, base in BUCKET_PREFIX.items():
+        if rest.startswith(f"{base}-"):
+            return bucket
+    return None
 
 
 def usage_summary() -> list[dict]:
@@ -318,16 +386,18 @@ def usage_summary() -> list[dict]:
             return sorted(out, key=lambda item: item["bytes"], reverse=True)
         except Exception as err:
             log.warning("SQL storage summary failed: %s", err)
-    root = tenancy.client_root(UPLOAD_DIR)
+    folder = root(create=False)
+    grouped: dict[str, list[Path]] = {}
+    for item in folder.iterdir() if folder.is_dir() else []:
+        bucket = _bucket_of(item.name) if item.is_file() and item.stat().st_size > 0 else None
+        if bucket:
+            grouped.setdefault(bucket, []).append(item)
     out = []
-    for bucket in sorted(p for p in root.iterdir() if p.is_dir() and not p.name.startswith("_")) if root.is_dir() else []:
-        files = [f for f in bucket.iterdir() if f.is_file() and not f.name.endswith(".part") and f.stat().st_size > 0]
-        if not files:
-            continue
+    for bucket, files in sorted(grouped.items()):
         sizes = [f.stat().st_size for f in files]
         times = [f.stat().st_mtime for f in files]
         out.append({
-            "bucket": bucket.name,
+            "bucket": bucket,
             "files": len(sizes),
             "bytes": sum(sizes),
             "largestBytes": max(sizes),

@@ -59,6 +59,13 @@ async def lifespan(_app: FastAPI):
     anyio.to_thread.current_default_thread_limiter().total_tokens = env_int("API_THREADS", 24)
     for client in tenancy.CLIENTS:
         try:
+            if client == "slalom":
+                if env(admin_accounts.ADMIN_PASSWORD_ENVS[client]):
+                    log.info("%s admin password loaded from environment", client)
+                else:
+                    log.warning("%s admin password not setup (set %s)",
+                                client, admin_accounts.ADMIN_PASSWORD_ENVS[client])
+                continue
             if admin_accounts.ensure_console_password(client):
                 log.info("%s admin console password ready", client)
             else:

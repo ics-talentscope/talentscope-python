@@ -1,6 +1,5 @@
 import json
 import re
-import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any

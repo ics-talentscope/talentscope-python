@@ -152,8 +152,7 @@ def test_retention_prunes_only_old_recordings(tmp_path, monkeypatch):
     from services import storage
 
     monkeypatch.setattr(storage, "UPLOAD_DIR", tmp_path)
-    old, fresh = tmp_path / "recordings" / "old.webm", tmp_path / "recordings" / "fresh.webm"
-    old.parent.mkdir(parents=True)
+    old, fresh = tmp_path / "interview-recording-old.webm", tmp_path / "interview-recording-fresh.webm"
     old.write_bytes(b"x")
     fresh.write_bytes(b"x")
     os.utime(old, (time.time() - 90 * 86400,) * 2)

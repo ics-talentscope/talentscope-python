@@ -426,6 +426,7 @@ def delete_portal_employees(employee_ids: list[str]) -> int:
 
     store.delete("test_attempts", {"employee_id": employee_uuids})
     if test_ids:
+        store.delete("assessment_attempts", {"test_id": test_ids})
         store.delete("test_attempts", {"test_id": test_ids})
         store.delete("test_questions", {"test_id": test_ids})
         store.delete("tests", {"id": test_ids})

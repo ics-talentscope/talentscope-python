@@ -47,8 +47,7 @@ def test_get_delete_and_download(client, store, admin, tmp_path, monkeypatch):
     seed(store)
     assert client.get(f"/api/admin/resumes/{RID}", headers=admin).json()["resume"]["id"] == RID
     assert client.get(f"/api/admin/resumes/{RID}/download", headers=admin).status_code == 404
-    (tmp_path / "resumes").mkdir(exist_ok=True)
-    (tmp_path / "resumes" / f"{RID}-a.pdf").write_bytes(b"%PDF-1.4 x")
+    (tmp_path / f"resume-{RID}-a.pdf").write_bytes(b"%PDF-1.4 x")
     dl = client.get(f"/api/admin/resumes/{RID}/download", headers=admin)
     assert dl.status_code == 200 and dl.headers["content-type"] == "application/pdf"
     assert client.request("DELETE", "/api/admin/resumes", headers=admin, json={"ids": ["nope"]}).status_code == 400
@@ -206,3 +205,8 @@ def test_admin_employee_test_attempts_and_video(client, store, admin, monkeypatc
     part = client.get(f"/api/admin/employee-tests/{tid}/video", headers={**admin, "Range": "bytes=0-4"})
     assert part.status_code == 206 and len(part.content) == 5
     assert client.get(f"/api/admin/employee-tests/{tid}/video").status_code == 401
+
+
+def test_sync_reports_active_employee_tests(client, store, admin):
+    store.seed("tests", [{"id": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "status": "in_progress"}, {"id": "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "status": "pending"}])
+    assert client.get("/api/admin/sync", headers=admin).json()["activeTests"] == 1

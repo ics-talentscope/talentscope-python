@@ -13,7 +13,6 @@ EMP = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 @pytest.fixture()
 def admin(client, monkeypatch, tmp_path):
     monkeypatch.setattr("services.storage.UPLOAD_DIR", tmp_path)
-    monkeypatch.setattr("services.docs_storage.UPLOAD_DIR", tmp_path)
     monkeypatch.setattr("services.structured_log.UPLOAD_DIR", tmp_path)
     monkeypatch.setenv("ADMIN_PASSWORD", "AdminPw1!")
     pr.invalidate_mapping_cache()

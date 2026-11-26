@@ -213,14 +213,22 @@ Requirements:
         return fetch_questions(subject, topic, difficulty, count)
 
 
+_DIFFICULTY_DEFAULT_MARKS = {"beginner": 1, "intermediate": 2, "advanced": 3, "expert": 5}
+
+
+def _default_marks(difficulty: str) -> int:
+    return _DIFFICULTY_DEFAULT_MARKS.get((difficulty or "intermediate").strip().lower(), 2)
+
+
 def to_rows(test_id: str, generated: list[dict], topic_id: str, topic_title: str, default_difficulty: str) -> list[dict]:
     rows = []
     for i, q in enumerate(generated):
         correct = q.get("correctIndex", q.get("correct_option_index", 0))
+        difficulty = map_difficulty(q.get("difficulty") or default_difficulty)
         rows.append({
             "test_id": test_id, "question_index": i, "question_text": q["question"], "options": q["options"],
             "correct_option_index": correct, "explanation": q.get("explanation") or "",
-            "difficulty": map_difficulty(q.get("difficulty") or default_difficulty),
+            "difficulty": difficulty, "marks": int(q.get("marks") or _default_marks(difficulty)),
             "topic_id": topic_id, "topic_title": topic_title or topic_id,
         })
     return rows

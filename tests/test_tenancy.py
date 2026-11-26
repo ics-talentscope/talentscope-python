@@ -50,6 +50,20 @@ def test_admin_passwords_are_client_scoped(store, monkeypatch):
     assert admin_accounts.authenticate("admin@infinite.com", "SlalomPass123!") is None
 
 
+def test_slalom_admin_password_comes_from_environment_not_database(store, monkeypatch):
+    monkeypatch.setenv("SLALOM_ADMIN_EMAIL", "bootcamp-admin@slalom.com")
+    monkeypatch.setenv("SLALOM_ADMIN_PASSWORD", "EnvironmentPass123!")
+    admin_accounts.set_console_password("ObsoleteDatabasePass123!", "slalom")
+    stored = admin_accounts.console_secret("slalom")
+
+    access = admin_accounts.authenticate("bootcamp-admin@slalom.com", "EnvironmentPass123!")
+
+    assert access["email"] == "bootcamp-admin@slalom.com"
+    assert admin_accounts.authenticate("bootcamp-admin@slalom.com", "ObsoleteDatabasePass123!") is None
+    assert admin_accounts.ensure_console_password("slalom") is None
+    assert admin_accounts.console_secret("slalom") == stored
+
+
 def test_mismatched_token_client_is_rejected(client):
     token = sign_token("admin", 60 * 60 * 1000, email="admin@infinite.com", client="slalom")
     response = client.get("/api/admin/auth/validate", headers={"Authorization": f"Bearer {token}"})
@@ -104,8 +118,8 @@ def test_upload_buckets_are_scoped_on_disk(store, monkeypatch, tmp_path):
         storage.save("resumes", "candidate.txt", b"slalom")
         assert storage.read("resumes", "candidate.txt") == b"slalom"
 
-    assert (tmp_path / "resumes" / "candidate.txt").read_bytes() == b"infinite"
-    assert (tmp_path / "_clients" / "slalom" / "resumes" / "candidate.txt").read_bytes() == b"slalom"
+    assert (tmp_path / "resume-candidate.txt").read_bytes() == b"infinite"
+    assert (tmp_path / "slalom-resume-candidate.txt").read_bytes() == b"slalom"
 
 
 def test_raw_sql_filter_follows_request_scope():

@@ -88,6 +88,11 @@ def is_product_assessment_history_topic(topic_id: Optional[str]) -> bool:
     return str(topic_id or "").strip().startswith(PRODUCT_ASSESSMENT_HISTORY_TOPIC_ID)
 
 
+def is_product_assessment_topic(topic_id: Optional[str]) -> bool:
+    topic = str(topic_id or "").strip()
+    return topic == PRODUCT_ASSESSMENT_TOPIC_ID or topic.startswith(f"{PRODUCT_ASSESSMENT_TOPIC_ID}:")
+
+
 def get_account(employee_id: str) -> Optional[dict]:
     row = get_store().first("employees", {"employee_id": employee_id.strip()}, COLUMNS)
     return map_row(row) if row else None

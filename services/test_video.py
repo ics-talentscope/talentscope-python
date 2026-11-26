@@ -114,12 +114,9 @@ def _sql_list_ids() -> set[str]:
 def _disk_list_ids() -> set[str]:
     try:
         ids: set[str] = set()
-        folder = storage.bucket_dir(BUCKET, create=False)
-        if not folder.is_dir():
-            return ids
-        for path in folder.iterdir():
-            if path.is_file() and path.name.endswith(".webm") and path.stat().st_size > 0:
-                ids.add(path.name[:-5])
+        for name in storage.disk_names(BUCKET):
+            if name.endswith(".webm") and storage.disk_path(BUCKET, name).stat().st_size > 0:
+                ids.add(name[:-5])
         return ids
     except Exception:
         return set()
@@ -174,13 +171,6 @@ def delete(test_id: str) -> None:
     storage.remove(BUCKET, _name(test_id))
     _sql_delete(BUCKET, _name(test_id))
     _sql_delete(LEGACY_BUCKET, _legacy_path(test_id))
-    # Legacy disk layout used by older deploys.
-    try:
-        legacy = storage.bucket_dir(LEGACY_BUCKET) / "employee-tests" / _name(test_id)
-        if legacy.is_file():
-            legacy.unlink(missing_ok=True)
-    except Exception:
-        pass
 
 
 def list_ids() -> set[str]:
